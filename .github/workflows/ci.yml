@@ -1,0 +1,38 @@
+name: CI
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --all -- --check
+      - run: cargo test --all-targets
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Maintainability sensor harness (same sensors as local/pre-commit, on clean infra).
+      - name: Sensor harness (fast subset)
+        run: ./harness/run.sh --fast
+  audit:
+    # Repeated-cadence sensor: dependency CVEs fail the build, not just warn.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+  mutants:
+    # Mutation testing on every push, through the advisory mutants sensor:
+    # survivors are reported as warn (never block merges) so the trend is
+    # visible without false reds.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - run: MUTANTS=1 ./harness/run.sh --sensor mutants

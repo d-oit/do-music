@@ -1,0 +1,23 @@
+/target
+*.mp4
+/do-music-output/
+.env
+*.mp3
+*.wav
+*.pcm
+*.part
+.DS_Store
+
+# sensor harness local state (history + snapshot baselines)
+/harness/state/*
+!/harness/state/.gitkeep
+
+# skillevaluator reports
+/reports/
+
+# cargo-mutants output (written by the opt-in mutants sensor)
+/mutants.out/
+__pycache__/
+*.pyc
+/mutants.out.old/
+ffmpeg_*.deb

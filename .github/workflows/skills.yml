@@ -1,0 +1,37 @@
+name: Skills
+on:
+  push:
+    paths:
+      - ".agents/skills/**"
+  pull_request:
+    paths:
+      - ".agents/skills/**"
+jobs:
+  validate:
+    # NVIDIA SkillEvaluator gate on .agents/skills/.
+    # Hermetic subset: schema + unicode + quality are keyless and need no scanners.
+    # Progressive adoption: add security/pii/license checks once Semgrep,
+    # SkillSpector and Gitleaks are installed here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.13"
+      - name: Install SkillEvaluator
+        run: |
+          uv tool install --python 3.13 "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+      - name: Validate each skill (schema, unicode, quality >= 70)
+        run: |
+          set -euo pipefail
+          failed=0
+          for skill in .agents/skills/*/; do
+            echo "Validating ${skill}"
+            if ! skillevaluator validate "$skill" --type skill --external \
+                 --checks schema,quality,unicode --no-dedup \
+                 -r cli --min-score 70; then
+              failed=1
+            fi
+          done
+          exit $failed
