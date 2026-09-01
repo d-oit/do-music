@@ -9,6 +9,7 @@ pub mod api;
 pub mod assembly;
 pub mod config;
 pub mod duration;
+pub mod encode;
 pub mod plan;
 pub mod providers;
 pub mod render;

@@ -353,11 +353,16 @@ class Rings(_Style):
         self.r = np.sqrt((ex * width / height) ** 2 + ey**2)
         self.r /= float(self.r.max())
         self.ang = np.arctan2(ey, ex * width / height)
+        # Seed-dependent character: initial phase and ring-spacing scale so
+        # different seeds give visibly different ring layouts.
+        rng = np.random.default_rng(self.seed)
+        self.phase0 = float(rng.random()) * 6.283185307179586
+        self.spacing_scale = 0.85 + 0.30 * float(rng.random())
 
     def step(self, features, t: float) -> np.ndarray:
         bass, mid, treble = self._smooth_features(features)
-        spacing = 0.045 + 0.06 * bass + 0.02 * mid
-        swirl = 0.22 * np.sin(4.0 * self.ang + 0.6 * t + 1.5 * mid)
+        spacing = (0.045 + 0.06 * bass + 0.02 * mid) * self.spacing_scale
+        swirl = 0.22 * np.sin(4.0 * self.ang + 0.6 * t + 1.5 * mid + self.phase0)
         sparkle = treble * 0.15 * np.sin(2.0 * np.pi * self.r * 6.0 + 2.6 * t)
         field01 = 0.5 + 0.5 * np.sin(
             2.0 * np.pi * self.r / spacing - 1.8 * t + swirl + sparkle
@@ -388,7 +393,11 @@ class Spectrum(_Style):
     def __init__(self, width, height, seed):
         super().__init__(width, height, seed)
         self.peaks = np.zeros(self.BARS)
-        self.phase = 0.0
+        # Seed-dependent character: per-bar amplitude jitter (so different
+        # seeds give visibly different bar profiles) and an initial hue phase.
+        rng = np.random.default_rng(self.seed)
+        self.bar_jitter = 0.85 + 0.30 * rng.random(self.BARS)
+        self.phase = float(rng.random()) * 6.283185307179586
 
     def step(self, features, t: float) -> np.ndarray:
         f = np.asarray(features, dtype=np.float64).reshape(-1)
@@ -400,7 +409,7 @@ class Spectrum(_Style):
         log_pos = np.logspace(0, np.log10(n_src), self.BARS + 1) - 1
         bars = np.array([src[int(lo):max(int(lo) + 1, int(hi))].mean()
                          for lo, hi in zip(log_pos[:-1], log_pos[1:])])
-        bars = np.clip(bars * (0.7 + 0.9 * bass), 0.0, 1.0)
+        bars = np.clip(bars * (0.7 + 0.9 * bass) * self.bar_jitter, 0.0, 1.0)
 
         # Peak caps fall slowly (winamp-style peak hold); treble snaps faster.
         self.peaks = np.maximum(bars, self.peaks - self.PEAK_FALL * (1.0 + 2.0 * treble))
