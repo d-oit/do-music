@@ -88,6 +88,12 @@ enum CommandKind {
         /// ffmpeg xfade transition between scenes (fade, fadewhite, ...).
         #[arg(long, default_value = "fade")]
         xfade: String,
+        /// Parallel ffmpeg fallback segment renders.
+        #[arg(long, default_value = "2")]
+        jobs: usize,
+        /// Final video codec; H.264 is the YouTube-compatible default.
+        #[arg(long, default_value = "h264")]
+        video_codec: String,
         /// Fill prompt/duration/instrumental from a named template.
         #[arg(long)]
         template: Option<String>,
@@ -111,6 +117,15 @@ enum CommandKind {
         /// Deterministic engine seed.
         #[arg(long, default_value = "42")]
         seed: u64,
+        /// Video codec; H.264 is the YouTube-compatible default.
+        #[arg(long, default_value = "h264")]
+        codec: String,
+        /// Feature multiplier before the style EMA (1.0 neutral).
+        #[arg(long, default_value = "1.0")]
+        sensitivity: f64,
+        /// Palette brightness gain after the style render (1.0 neutral).
+        #[arg(long, default_value = "1.0")]
+        gain: f64,
         /// Output video path.
         #[arg(long, short)]
         output: Option<PathBuf>,
@@ -193,6 +208,8 @@ async fn main() -> Result<()> {
             scenes,
             audio,
             xfade,
+            jobs,
+            video_codec,
             template,
             optimize: _,
         }) => {
@@ -216,6 +233,8 @@ async fn main() -> Result<()> {
                 scenes,
                 audio,
                 xfade,
+                jobs,
+                video_codec,
             };
             video_pipeline::run_video(job).await
         }
@@ -225,8 +244,24 @@ async fn main() -> Result<()> {
             palette,
             mirror,
             seed,
+            codec,
+            sensitivity,
+            gain,
             output,
-        }) => commands::run_visual(&audio, &style, &palette, mirror, seed, output).await,
+        }) => {
+            commands::run_visual(
+                &audio,
+                &style,
+                &palette,
+                mirror,
+                seed,
+                &codec,
+                sensitivity,
+                gain,
+                output,
+            )
+            .await
+        }
         None => {
             let prompt = cli.prompt.ok_or_else(|| anyhow!("missing prompt"))?;
             run_generation(
@@ -303,7 +338,28 @@ async fn run_generation(
     }
     let out =
         output.unwrap_or_else(|| dir.join(assembly::default_output_name(requested.seconds())));
-    assembly::assemble(&files, &out).await?;
+    // YouTube long-form (≥30 m) gets loudnorm + 8 s crossfades; short mixes keep the
+    // fast lossless concat so a 4 m test stays bit-identical.
+    let use_youtube = requested.seconds() >= 30 * 60 && files.len() > 1;
+    if use_youtube {
+        println!(
+            "Assembling {} tracks with 8 s crossfades + loudnorm -14 LUFS (YouTube)…",
+            files.len()
+        );
+        assembly::assemble_youtube(&files, &out).await?;
+        // Chapters sidecar for YouTube description paste.
+        let chapters = assembly::youtube_chapters(&tracks);
+        let chap_path = out.with_extension("chapters.txt");
+        tokio::fs::write(&chap_path, &chapters).await?;
+        println!("Chapters: {}\n{}", chap_path.display(), chapters);
+        // Keep track intermediates for debugging; delete with `rm do-music-output/track-*.mp3` when done.
+        println!(
+            "Tip: `rm do-music-output/track-*.mp3` to reclaim ~30 MB after verifying {}",
+            out.display()
+        );
+    } else {
+        assembly::assemble(&files, &out).await?;
+    }
     println!("Done: {}", out.display());
     Ok(())
 }

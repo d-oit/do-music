@@ -1,12 +1,16 @@
 //! Highlight-video pipeline: scene planning, per-scene H3/ffmpeg animation,
 //! transition chain, and final audio mux. Orchestration only; every network
 //! transport lives in `providers.rs`.
+//!
+//! H3 returns short clips, so successful AI shots are loop-extended to the
+//! planned segment duration before the final chain. This is essential for
+//! keeping scene boundaries synchronized with the music.
 use anyhow::{Context, Result};
 use do_music::config::Settings;
 use do_music::duration::Duration;
 use do_music::providers;
 use do_music::render;
-use do_music::video::{self, AnimationKind};
+use do_music::video;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 
@@ -22,6 +26,10 @@ pub struct VideoJob {
     pub scenes: Option<PathBuf>,
     pub audio: Option<PathBuf>,
     pub xfade: String,
+    /// Max ffmpeg fallback segments rendered concurrently.
+    pub jobs: usize,
+    /// Codec for the final chained video (see render::FINAL_CODEC_CHOICES).
+    pub video_codec: String,
 }
 
 /// Orchestrate the highlight video path: scene list (builtin or --scenes),
@@ -82,6 +90,9 @@ pub(crate) async fn run_video(job: VideoJob) -> Result<()> {
 
     // Video: render segments, chain with the transition, mux.
     let final_path = final_path(&dir, &job);
+    if let Some(parent) = final_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).await?;
+    }
     render_video(
         &settings,
         &dir,
@@ -161,11 +172,21 @@ fn video_only_path(dir: &Path, job: &VideoJob) -> PathBuf {
     dir.join(name)
 }
 
+/// Return true only for a cached segment whose duration matches the plan.
+async fn cached_segment_is_usable(path: &Path, target_secs: f64) -> bool {
+    path.exists()
+        && render::probe_duration(path)
+            .await
+            .map(|actual| (actual - target_secs).abs() <= 0.75)
+            .unwrap_or(false)
+}
+
 /// Render the planned video: images → segments → transition chain → mux.
 ///
 /// Each scene tries H3 first (unless `no_i2v`); the first failure prints one
 /// warning and switches the rest of the run to the ffmpeg fallback (a 402 or
-/// 503 will not heal mid-run). Cached `seg-NN.mp4` files are reused.
+/// 503 will not heal mid-run). Cached `seg-NN.mp4` files are reused only when
+/// their duration matches the current plan.
 async fn render_video(
     settings: &Settings,
     dir: &Path,
@@ -196,47 +217,89 @@ async fn render_video(
     ));
     fs::create_dir_all(&seg_dir).await?;
 
-    let mut rendered = Vec::new();
+    // H3 attempts stay sequential: the first failure permanently disables
+    // i2v for the run (a 402/503 will not heal mid-run), so parallel calls
+    // would only pile onto a dead provider. Cached segments and the ffmpeg
+    // zoompan fallback, by contrast, are independent and run concurrently.
+    let mut slots: Vec<Option<PathBuf>> = vec![None; segments.len()];
     let mut i2v_disabled = job.no_i2v;
+    let mut fallback: Vec<(usize, PathBuf, PathBuf, f64)> = Vec::new();
     for (i, seg) in segments.iter().enumerate() {
         let out = seg_dir.join(format!("seg-{:02}.mp4", i + 1));
-        if out.exists() {
-            rendered.push(out);
+        // A previous run may have left behind a short, pre-loop H3 clip. Do
+        // not mistake it for a complete segment: the xfade offsets assume
+        // every input covers the planned duration.
+        if cached_segment_is_usable(&out, seg.duration).await {
+            slots[i] = Some(out);
+            println!("✓ segment {}/{} (cached)", i + 1, segments.len());
             continue;
         }
-        let used = if i2v_disabled {
-            AnimationKind::Zoompan
-        } else {
+
+        let mut rendered_by_ai = false;
+        if !i2v_disabled {
             let (_, image_url) = &scenes[i];
-            match providers::animate_h3(
-                &settings.api_key,
-                &settings.music_url,
-                &job.video_model,
-                &video::h3_motion_prompt(&seg.motion_prompt, None),
-                image_url,
-                &out,
-            )
-            .await
-            {
-                Ok(()) => AnimationKind::Ai,
+            let h3_raw = seg_dir.join(format!("seg-{:02}.h3.mp4", i + 1));
+            let ai_result = async {
+                if !h3_raw.exists() {
+                    providers::animate_h3(
+                        &settings.api_key,
+                        &settings.music_url,
+                        &job.video_model,
+                        &video::h3_motion_prompt(&seg.motion_prompt, None),
+                        image_url,
+                        &h3_raw,
+                    )
+                    .await?;
+                }
+                let source_secs = render::probe_duration(&h3_raw).await?;
+                if source_secs <= 0.0 {
+                    anyhow::bail!("H3 returned a zero-length clip");
+                }
+                render::loop_extend_clip(&h3_raw, &out, seg.duration, source_secs).await
+            }
+            .await;
+            match ai_result {
+                Ok(()) => rendered_by_ai = true,
                 Err(e) => {
                     println!(
                         "⚠ H3 unavailable ({e}) — using supersampled ffmpeg fallback for remaining scenes"
                     );
                     i2v_disabled = true;
-                    AnimationKind::Zoompan
                 }
             }
-        };
-        if used == AnimationKind::Zoompan {
-            render::render_zoompan_segment(&seg.image, &out, i, seg.duration).await?;
         }
-        println!("✓ segment {}/{}", i + 1, segments.len());
-        rendered.push(out);
+        if rendered_by_ai {
+            slots[i] = Some(out);
+            println!("✓ segment {}/{} (H3)", i + 1, segments.len());
+        } else {
+            fallback.push((i, seg.image.clone(), out, seg.duration));
+        }
     }
 
+    // Render fallback segments in bounded-parallel batches.
+    let jobs = job.jobs.max(1);
+    let total = segments.len();
+    for batch in fallback.chunks(jobs) {
+        let mut set = tokio::task::JoinSet::new();
+        for (i, image, out, dur) in batch {
+            let (i, image, out, dur) = (*i, image.clone(), out.clone(), *dur);
+            set.spawn(async move { render::render_zoompan_segment(&image, &out, i, dur).await });
+        }
+        while let Some(res) = set.join_next().await {
+            res.context("fallback render task panicked")??;
+        }
+        for (i, _, out, _) in batch {
+            slots[*i] = Some(out.clone());
+            println!("✓ segment {}/{} (ffmpeg)", i + 1, total);
+        }
+    }
+    let rendered: Vec<PathBuf> = slots
+        .into_iter()
+        .map(|s| s.expect("segment rendered"))
+        .collect();
+
     let chained = dir.join("video-xfade.mp4");
-    render::xfade_chain(&rendered, &chained, &job.xfade, seg_secs).await?;
+    render::xfade_chain(&rendered, &chained, &job.xfade, seg_secs, &job.video_codec).await?;
     match audio {
         Some(audio_path) => {
             render::mux_video_audio(

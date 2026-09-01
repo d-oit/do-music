@@ -9,15 +9,21 @@ use std::path::{Path, PathBuf};
 /// One CLI flag for the python visualizer, in clap-ValueEnum string form.
 pub struct VisualStyle(pub &'static str);
 
-/// Supported `--style` choices; must match python `STYLES` keys.
 pub const STYLE_CHOICES: &[VisualStyle] = &[
     VisualStyle("flow"),
     VisualStyle("bloom"),
     VisualStyle("plasma"),
+    VisualStyle("waves"),
+    VisualStyle("rings"),
+    VisualStyle("spectrum"),
+    VisualStyle("kaleido"),
 ];
 
 /// Supported `--palette` choices; must match python `PALETTES` keys.
-pub const PALETTE_CHOICES: &[&str] = &["zen", "ink", "abyss", "ember"];
+pub const PALETTE_CHOICES: &[&str] = &["zen", "ink", "abyss", "ember", "aurora", "neon"];
+
+/// Supported output codecs; H.264 is the YouTube-compatible default.
+pub const CODEC_CHOICES: &[&str] = &["h264", "hevc", "av1"];
 
 /// Embedded package source, grouped per file (path inside `visualizer/`).
 const PACKAGE_FILES: &[(&str, &str)] = &[
@@ -65,16 +71,27 @@ pub fn ensure_package() -> Result<PathBuf> {
     Ok(base)
 }
 
+/// Video encoding options passed to the embedded visualizer.
+#[derive(Debug, Clone, Copy)]
+pub struct EncodeOptions<'a> {
+    pub codec: &'a str,
+    pub preset: &'a str,
+    /// Feature multiplier before the style EMA (1.0 = neutral).
+    pub sensitivity: f64,
+    /// Palette brightness gain after the style render (1.0 = neutral).
+    pub gain: f64,
+}
+
 /// Build the `python3 -m visualizer` argv. `wav` must already be a
-/// 22050 Hz mono PCM file; `preset` is the x265 encode preset.
+/// 22050 Hz mono PCM file.
 pub fn python_args(
     wav: &Path,
     style: &str,
     palette: &str,
     mirror: bool,
     seed: u64,
+    encoding: EncodeOptions<'_>,
     out: &Path,
-    preset: &str,
 ) -> Vec<String> {
     let mut args = vec![
         "-m".to_string(),
@@ -91,7 +108,17 @@ pub fn python_args(
         args.push("--mirror".to_string());
     }
     args.push("--preset".to_string());
-    args.push(preset.to_string());
+    args.push(encoding.preset.to_string());
+    args.push("--codec".to_string());
+    args.push(encoding.codec.to_string());
+    if encoding.sensitivity != 1.0 {
+        args.push("--sensitivity".to_string());
+        args.push(format!("{}", encoding.sensitivity));
+    }
+    if encoding.gain != 1.0 {
+        args.push("--gain".to_string());
+        args.push(format!("{}", encoding.gain));
+    }
     args.push("-o".to_string());
     args.push(out.display().to_string());
     args
@@ -124,8 +151,13 @@ mod tests {
             "zen",
             false,
             42,
+            EncodeOptions {
+                codec: "h264",
+                preset: "medium",
+                sensitivity: 1.0,
+                gain: 1.0,
+            },
             Path::new("/tmp/v.mp4"),
-            "medium",
         );
         let text = args.join(" ");
         for flag in [
@@ -134,6 +166,7 @@ mod tests {
             "--palette zen",
             "--seed 42",
             "--preset medium",
+            "--codec h264",
             "-o /tmp/v.mp4",
         ] {
             assert!(text.contains(flag), "missing {flag} in {text}");
@@ -142,6 +175,31 @@ mod tests {
             !text.contains("--mirror"),
             "mirror must be omitted when false"
         );
+        // Neutral sensitivity/gain must not be forwarded to python.
+        assert!(!text.contains("--sensitivity"));
+        assert!(!text.contains("--gain"));
+    }
+
+    #[test]
+    fn python_args_forwards_sensitivity_and_gain_when_nonneutral() {
+        let args = python_args(
+            Path::new("/tmp/a.wav"),
+            "kaleido",
+            "neon",
+            true,
+            7,
+            EncodeOptions {
+                codec: "av1",
+                preset: "fast",
+                sensitivity: 1.5,
+                gain: 0.8,
+            },
+            Path::new("/tmp/v.mp4"),
+        );
+        let text = args.join(" ");
+        assert!(text.contains("--sensitivity 1.5"), "text: {text}");
+        assert!(text.contains("--gain 0.8"), "text: {text}");
+        assert!(text.contains("--mirror"));
     }
 
     #[test]

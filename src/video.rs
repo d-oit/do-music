@@ -255,9 +255,10 @@ pub fn h3_motion_prompt(scene_text: &str, motion_cue: Option<&str>) -> String {
 /// Ensure `count` scene images exist, downloading missing ones from
 /// Pollinations with deterministic seeds.
 ///
-/// Reuses an existing `scene-NN.png` when larger than 20 KiB. Otherwise
-/// walks the seed ladder (attempts 0..4), sleeping 20 s after HTTP 429 and
-/// 5 s after other failures; all attempts exhausted names the scene.
+/// Reuses an existing `scene-NN.png` when larger than 20 KiB **and** its
+/// adjacent `.url` sidecar matches the current prompt/style/negative URL.
+/// Otherwise walks the seed ladder (attempts 0..4), sleeping 20 s after HTTP
+/// 429 and 5 s after other failures; all four attempts exhausted names the scene.
 pub async fn ensure_scene_images(
     frames_dir: &Path,
     scenes: &SceneList,
@@ -273,10 +274,17 @@ pub async fn ensure_scene_images(
             scenes.style.as_deref(),
             scenes.negative.as_deref(),
         );
+        let cache_key = path.with_extension("url");
+        // Scene filenames are positional; the sidecar prevents a changed
+        // prompt/style from silently reusing an image from an older project.
         let reusable = tokio::fs::metadata(&path)
             .await
             .map(|m| m.len() > 20 * 1024)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && tokio::fs::read_to_string(&cache_key)
+                .await
+                .map(|cached| cached.trim() == url)
+                .unwrap_or(false);
         if reusable {
             result.push((path.clone(), url));
             continue;
@@ -293,6 +301,7 @@ pub async fn ensure_scene_images(
             );
             match providers::fetch_scene_image(&url, &path).await {
                 Ok(_) => {
+                    tokio::fs::write(&cache_key, &url).await?;
                     result.push((path.clone(), url));
                     fetched = true;
                     break;

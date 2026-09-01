@@ -39,8 +39,13 @@ fn python_args_contains_every_flag_and_omits_mirror_when_false() {
         "zen",
         false,
         42,
+        do_music::visual::EncodeOptions {
+            codec: "h264",
+            preset: "medium",
+            sensitivity: 1.0,
+            gain: 1.0,
+        },
         std::path::Path::new("/tmp/v.mp4"),
-        "medium",
     );
     let text = args.join(" ");
     for flag in [
@@ -50,6 +55,7 @@ fn python_args_contains_every_flag_and_omits_mirror_when_false() {
         "--palette zen",
         "--seed 42",
         "--preset medium",
+        "--codec h264",
         "-o /tmp/v.mp4",
     ] {
         assert!(text.contains(flag), "missing `{flag}` in `{text}`");
@@ -61,21 +67,29 @@ fn python_args_contains_every_flag_and_omits_mirror_when_false() {
         "ink",
         true,
         7,
+        do_music::visual::EncodeOptions {
+            codec: "hevc",
+            preset: "fast",
+            sensitivity: 1.5,
+            gain: 0.8,
+        },
         std::path::Path::new("/tmp/v.mp4"),
-        "fast",
     );
     assert!(with_mirror.contains(&"--mirror".to_string()));
     let mirror_text = with_mirror.join(" ");
     assert!(mirror_text.contains("--preset fast"));
+    assert!(mirror_text.contains("--codec hevc"));
 }
 
 #[test]
 fn value_enum_choices_match_python() {
     // Rust side: the CLI's accepted values (kept in `visual.rs`),
     // sorted to match python's `sorted()` output.
-    let mut rust_styles = vec!["flow", "bloom", "plasma"];
+    let mut rust_styles = vec![
+        "flow", "bloom", "plasma", "waves", "rings", "spectrum", "kaleido",
+    ];
     rust_styles.sort_unstable();
-    let mut rust_palettes = vec!["zen", "ink", "abyss", "ember"];
+    let mut rust_palettes = vec!["zen", "ink", "abyss", "ember", "aurora", "neon"];
     rust_palettes.sort_unstable();
     // Python side: read from the embedded package sources.
     let py = run_python(
@@ -223,6 +237,32 @@ print('ok')",
                 println!("SKIP: python3/numpy unavailable");
             } else {
                 panic!("plasma determinism failed: {e}");
+            }
+        }
+    }
+}
+
+#[test]
+fn waves_and_rings_deterministic_and_band_reactive() {
+    match run_python(
+        "import numpy as np
+from visualizer.styles import Waves, Rings
+for cls in (Waves, Rings):
+    a = cls(64, 36, 7); fa = a.step(np.zeros(3), 1.0)
+    b = cls(64, 36, 7); fb = b.step(np.zeros(3), 1.0)
+    assert fa.shape == (36, 64, 3) and fa.dtype == np.uint8, (cls.__name__, fa.shape)
+    assert np.array_equal(fa, fb), f'{cls.__name__} same seed diverged'
+    bass = cls(64, 36, 7).step(np.array([1.0, 0.0, 0.0]), 1.0)
+    treble = cls(64, 36, 7).step(np.array([0.0, 0.0, 1.0]), 1.0)
+    assert not np.array_equal(bass, treble), f'{cls.__name__} not band-reactive'
+print('ok')",
+    ) {
+        Ok(s) => assert_eq!(s, "ok"),
+        Err(e) => {
+            if python_numpy_available().is_none() {
+                println!("SKIP: python3/numpy unavailable");
+            } else {
+                panic!("waves/rings determinism failed: {e}");
             }
         }
     }

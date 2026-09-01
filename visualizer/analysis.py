@@ -77,15 +77,16 @@ class WAVNotPCMError(ValueError):
 
 
 
-
 def frame_features(path: str) -> np.ndarray:
     """Per-frame (bass, mid, treble) energies, shape (n_frames, 3).
 
     Frames advance `_HOP` samples; energies are mean-square magnitudes of
-    FFT bins in each band. Normalized so the loudest band peak reaches
-    1.0, then sqrt-compressed so quiet passages still carry usable
-    dynamic range (a calm meditation track sits far below its loudest
-    peak; linear scaling would starve the visual engine).
+    FFT bins in each band. Normalized per-band to its 98th percentile
+    then sqrt-compressed — this keeps quiet passages usable (linear
+    scaling would starve calm meditation audio) while preserving
+    cross-band balance: a global peak (old code) lets a single loud bass
+    hit suppress mid/treble to ~0.1, breaking `plasma`'s treble-driven
+    warp and `flow`'s sparkle. Per-band keeps each band's dynamics.
     """
     samples, rate = load_wav_pcm(path)
     if len(samples) < _WINDOW:
@@ -102,10 +103,56 @@ def frame_features(path: str) -> np.ndarray:
         mask = (freqs >= lo) & (freqs < hi)
         out[:, i] = spectrum[:, mask].mean(axis=1)
 
-    peak = out.max()
-    if peak <= 0:
-        return np.zeros_like(out)
-    return np.sqrt(out / peak)
+    # Per-band 98th percentile (deterministic, robust to a single transient spike).
+    # Quiet bands (pure tones) must stay quiet: floor each band's peak at
+    # 2e-5 of the global max so a silent treble on a 55 Hz tone doesn't get
+    # amplified from -60 dB to 0 dB by its own tiny percentile, but real
+    # musical treble (p98 ~ 2.7e-05 * global) still gets its own peak and
+    # drives `plasma`'s warp / `flow`'s sparkle audibly.
+    global_max = float(out.max())
+    peaks = np.percentile(out, 98, axis=0)
+    floor = global_max * 2e-05 if global_max > 1e-12 else 1.0
+    peaks = np.where(peaks < floor, floor, peaks)
+    peaks = np.where(peaks <= 1e-12, 1.0, peaks)
+    normed = out / peaks[None, :]
+    normed = np.clip(normed, 0.0, 1.5) / 1.5  # allow slight clipping headroom past p98
+    return np.sqrt(normed)
+
+
+def onset_envelope(features: np.ndarray) -> np.ndarray:
+    """Spectral-flux onset strength per frame, shape (n_frames,).
+
+    Half-wave rectified flux summed over all bands, then adaptive-threshold
+    peak-picked (librosa-style: median filter of `w` frames + delta margin).
+    Deterministic, numpy-only — no librosa dependency.
+    """
+    flux = np.maximum(np.diff(features, axis=0), 0.0).sum(axis=1)
+    flux = np.concatenate(([0.0], flux))  # realign to feature frames
+    w = 8  # adaptive window ~0.19 s at 43 fps
+    if len(flux) < w * 2:
+        return flux
+    pad = np.pad(flux, w // 2, mode="edge")
+    med = np.convolve(pad, np.ones(w) / w, mode="valid")[: len(flux)]
+    return np.maximum(flux - med - 0.02, 0.0)
+
+
+def spectral_centroid(path: str) -> np.ndarray:
+    """Per-frame spectral centroid normalized to 0..1, shape (n_frames,).
+
+    Brightness timbre feature: 0 = pure bass, 1 = all energy at Nyquist.
+    Uses the same windowing as `frame_features`.
+    """
+    samples, rate = load_wav_pcm(path)
+    if len(samples) < _WINDOW:
+        raise ValueError(f"{path}: audio too short ({len(samples)} samples)")
+    frames = 1 + (len(samples) - _WINDOW) // _HOP
+    idx = np.arange(_WINDOW)[None, :] + _HOP * np.arange(frames)[:, None]
+    windows = samples[idx] * np.hanning(_WINDOW)
+    spectrum = np.abs(np.fft.rfft(windows, axis=1))
+    freqs = np.fft.rfftfreq(_WINDOW, 1.0 / rate)
+    mag = spectrum + 1e-12
+    centroid = (spectrum * freqs[None, :]).sum(axis=1) / mag.sum(axis=1)
+    return np.clip(centroid / (rate / 2.0), 0.0, 1.0)
 
 
 def extreme_windows(features: np.ndarray, seconds: float, hop_rate: float) -> tuple[float, float]:

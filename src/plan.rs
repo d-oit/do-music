@@ -60,9 +60,18 @@ pub fn plan_tracks(duration: Duration) -> Vec<u64> {
 /// Build the prompt for one section of a long-form piece.
 ///
 /// Keeps the same musical palette, names the position, and ends in a way that
-/// crossfades cleanly into the next section.
+/// crossfades cleanly into the next section. For long-form (e.g. 60 m = 15
+/// sections) the `SECTION_PHASES` arc is distributed proportionally across
+/// the sections so every phase appears, rather than wrapping abruptly and
+/// collapsing the tail to `closing`.
 pub fn section_prompt(spec: &MusicSpec, index: usize, total: usize) -> String {
-    let phase = SECTION_PHASES[index.min(SECTION_PHASES.len() - 1)];
+    let phase = if total <= SECTION_PHASES.len() {
+        SECTION_PHASES[index.min(SECTION_PHASES.len() - 1)]
+    } else {
+        let ratio = index as f64 / total as f64;
+        let phase_idx = (ratio * SECTION_PHASES.len() as f64) as usize;
+        SECTION_PHASES[phase_idx.min(SECTION_PHASES.len() - 1)]
+    };
     format!(
         "{}; maintain the same musical palette across the long-form work; section {}/{}; {} phase; smooth ending suitable for crossfade; {}",
         spec.style_prompt,

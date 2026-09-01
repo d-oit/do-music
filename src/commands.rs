@@ -180,14 +180,19 @@ fn print_provider_rows(statuses: &[providers::ProviderStatus]) {
 /// `visual`: generative audio-reactive video from an existing track.
 ///
 /// Probe the audio, materialize it as 22050 Hz mono PCM WAV (numpy-only
-/// analysis), run the embedded python visualizer (frames piped to
-/// ffmpeg x265), then mux the video with the original audio.
+/// analysis), run the embedded python visualizer (frames piped to ffmpeg),
+/// then mux the video with the original audio. H.264 is the YouTube-safe
+/// default; HEVC and AV1 are explicit alternatives for smaller local files.
+#[allow(clippy::too_many_arguments)] // one parameter per user-facing CLI flag; each is forwarded to the visualizer
 pub async fn run_visual(
     audio: &Path,
     style: &str,
     palette: &str,
     mirror: bool,
     seed: u64,
+    codec: &str,
+    sensitivity: f64,
+    gain: f64,
     output: Option<PathBuf>,
 ) -> Result<()> {
     use do_music::visual;
@@ -197,13 +202,16 @@ pub async fn run_visual(
     }
     if !visual::STYLE_CHOICES.iter().any(|s| s.0 == style) {
         return Err(anyhow!(
-            "unknown --style {style}; choices: flow, bloom, plasma"
+            "unknown --style {style}; choices: flow, bloom, plasma, waves, rings, spectrum, kaleido"
         ));
     }
     if !visual::PALETTE_CHOICES.contains(&palette) {
         return Err(anyhow!(
-            "unknown --palette {palette}; choices: zen, ink, abyss, ember"
+            "unknown --palette {palette}; choices: zen, ink, abyss, ember, aurora, neon"
         ));
+    }
+    if !visual::CODEC_CHOICES.contains(&codec) {
+        return Err(anyhow!("unknown --codec {codec}; choices: h264, hevc, av1"));
     }
     visual::check_python()?;
     let package_parent = visual::ensure_package()?;
@@ -228,10 +236,23 @@ pub async fn run_visual(
     let raw_video = work.join("visual-video-only.mp4");
     render::materialize_pcm_wav(audio, &wav).await?;
 
-    // Long tracks use the cheaper x265 preset (plan contingency: >40 min
-    // encode budget); previews keep medium.
+    // Long tracks use the cheaper preset (plan contingency: >40 min encode
+    // budget); previews keep medium.
     let preset = if total_secs > 120.0 { "fast" } else { "medium" };
-    let args = visual::python_args(&wav, style, palette, mirror, seed, &raw_video, preset);
+    let args = visual::python_args(
+        &wav,
+        style,
+        palette,
+        mirror,
+        seed,
+        visual::EncodeOptions {
+            codec,
+            preset,
+            sensitivity,
+            gain,
+        },
+        &raw_video,
+    );
     let status = tokio::process::Command::new("python3")
         .args(&args)
         .env("PYTHONPATH", &package_parent)
@@ -255,6 +276,9 @@ pub async fn run_visual(
             ))
             .with_extension("mp4"),
     };
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).await?;
+    }
     render::mux_video_audio(&raw_video, audio, &out, total_secs).await?;
     let _ = fs::remove_dir_all(&work).await;
     println!("Done: {}", out.display());

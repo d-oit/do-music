@@ -48,7 +48,7 @@ do-music setup [--api-key ...] [--llm-model ...] [--music-model ...] [--video-mo
 do-music providers
 do-music template list|show <name>|new <name>
 do-music video <prompt> [--duration 10m] [--scenes <list.json>] [--audio <track>] [--xfade <name>] [--no-i2v]
-do-music visual <audio> [--style flow|bloom|plasma] [--palette zen|ink|abyss|ember] [--mirror] [--seed 42]
+do-music visual <audio> [--style flow|bloom|plasma|waves|rings] [--palette zen|ink|abyss|ember|aurora] [--codec h264|hevc] [--mirror] [--seed 42]
 ```
 
 ## Sample usage: "The River Above" (100% free pipeline)
@@ -72,22 +72,31 @@ do-music video --scenes examples/river-above-scenes.json \
   -o do-music-output/river-above-3m.mp4
 ```
 
-Verified live 2026-08-29: 76.2 s track, 76.0 s 1920x1080 HEVC video, six
-scenes (drop-ripple → koi rises → village flyover → bloom → drift → closing
-ripple ring), zero fades.
+The final `video` output is YouTube-ready by default: MP4 with fast-start,
+progressive H.264 High Profile at 30 fps, BT.709 color, and stereo AAC-LC at
+48 kHz. H3's short clips are loop-extended before the xfade chain, so scene
+boundaries stay aligned to the music; a one-scene list is supported too. Use
+`--codec hevc` only when smaller local files matter more than universal
+playback. These choices follow YouTube's current upload guidance (H.264,
+AAC-LC/48 kHz, 4:2:0, and MP4 fast-start).
+
+Verified live 2026-08-29: 76.2 s track, 76.0 s 1920x1080 video, six scenes
+(drop-ripple → koi rises → village flyover → bloom → drift → closing ripple
+ring), zero fades. The live check used an older HEVC artifact; new renders use
+the YouTube-compatible H.264 default.
 
 ## Generative visuals (CPU-only, no API)
 
 
 `do-music visual` renders audio-reactive generative video from any track:
 flow-field particle trails (`flow`), Gray-Scott reaction-diffusion growth
-(`bloom`), or domain-warped fbm clouds (`plasma`), colored by four palettes.
+(`bloom`), or domain-warped fbm clouds (`plasma`), colored by five palettes.
 Frames are generated frame-by-frame in a numpy-only Python engine
 (`visualizer/`, no pip installs beyond numpy) and piped into ffmpeg
-(x265 1080p30); the audio is muxed back at the end. Deterministic per
-`--seed`. Band energies (bass/mid/treble) drive motion speed, pattern
+(H.264 1080p30 by default); the audio is muxed back at the end. Deterministic
+per `--seed`. Band energies (bass/mid/treble) drive motion speed, pattern
 contrast, and palette position with a slow-release ambient mapping —
-no beat flash.
+no beat flash. Pass `--codec hevc` for a smaller local artifact.
 
 ```bash
 do-music visual do-music-output/working-calm-10m.mp3 --style flow --palette zen

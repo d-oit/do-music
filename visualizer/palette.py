@@ -37,6 +37,20 @@ PALETTES = {
         (224, 120, 34),
         (252, 226, 168),
     ),
+    # Dawn healing: deep indigo night, violet, teal, pale dawn gold.
+    "aurora": (
+        (12, 10, 34),
+        (88, 42, 122),
+        (34, 124, 158),
+        (250, 212, 142),
+    ),
+    # Cyberpunk neon: near-black, deep purple, hot magenta, electric cyan.
+    "neon": (
+        (6, 4, 18),
+        (74, 16, 120),
+        (236, 32, 128),
+        (52, 232, 222),
+    ),
 }
 
 

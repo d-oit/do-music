@@ -2,10 +2,9 @@
 //! xfade chain, mux, and probes.
 //!
 //! Pure arg builders are offline-testable here; spawning happens through
-//! `run_ffmpeg`. Quality chain (per revamp plan): supersampled zoompan with
-//! vignette + grain + grade, HEVC CRF 18 segments / CRF 20 chain,
-//! `-an` + `minterpolate=mi_mode=blend` loop-extend for H3 clips,
-//! `-tag:v hvc1` mux. ffmpeg must be on PATH (`/home/doit/bin` locally).
+//! `run_ffmpeg`. Intermediate segments may use HEVC, but the final chain and
+//! mux are YouTube-safe H.264/AAC: MP4 fast-start, BT.709, progressive 30 fps,
+//! and stereo 48 kHz audio. ffmpeg must be on PATH.
 use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
@@ -18,13 +17,30 @@ use crate::video::{OUTPUT_HEIGHT, OUTPUT_WIDTH, VIDEO_FPS, XFADE_SECONDS};
 /// 2304-wide chain), then a 30 s breathing cycle zooming 1.0-1.06 with
 /// cosine easing, centered, 30 fps; finish with vignette, grade, film
 /// grain; HEVC CRF 18, yuv420p.
+///
+/// v2 (2026-08-31): add subtle pan drift so highlights don't feel
+/// tripod-locked. Each scene gets a deterministic drift angle and amplitude
+/// over the available zoom crop (60 s period), so the source is never read
+/// outside its bounds. Meditation stillness is preserved: zoom stays
+/// 1.00–1.032 and pan remains subtle; the eye tracks motion without feeling
+/// `Ken Burns`.
 pub fn zoompan_args(scene_index: usize, duration_secs: f64) -> Vec<String> {
-    // Odd scenes inhale (start at zoom 1.0), even scenes exhale (start at
-    // 1.06) so consecutive scenes breathe in opposition, like the prior build.
-    let phase = if scene_index.is_multiple_of(2) {
-        '-'
+    // Alternating inhale/exhale per scene; slight per-scene period/amplitude
+    // jitter avoids the "metronome" feel when chaining 10×61.8s segments.
+    let inhale = scene_index.is_multiple_of(2);
+    // Deterministic drift: scene_index hashes to an angle, keeping renders reproducible.
+    // The multiplier is applied to the available crop margin below, so panning
+    // never asks zoompan to read outside the source frame.
+    let drift_deg = (scene_index as f64 * 47.0) % 360.0;
+    let drift_rad = drift_deg.to_radians();
+    let drift_x = drift_rad.cos() * 0.65;
+    let drift_y = drift_rad.sin() * 0.65;
+    // Per-scene breathing amplitude 0.028–0.032 (instead of fixed 0.03).
+    let amp = 0.028 + (scene_index as f64 % 5.0) * 0.001;
+    let breathing = if inhale {
+        format!("1.0+{amp:.3}*(1.0-cos(2*PI*on/900))/2")
     } else {
-        '+'
+        format!("1.0+{amp:.3}*(1.0+cos(2*PI*on/900))/2")
     };
     vec![
         "-y".into(),
@@ -36,7 +52,7 @@ pub fn zoompan_args(scene_index: usize, duration_secs: f64) -> Vec<String> {
         format!("{duration_secs:.3}"),
         "-vf".into(),
         format!(
-            "scale=5760:3240:flags=lanczos,zoompan=z='{phase}0.03+0.03*cos(2*PI*on/900)':x='iw/2-(iw/zoom)/2':y='ih/2-(ih/zoom)/2':d=1:s={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}:fps={VIDEO_FPS},vignette=PI/6,eq=contrast=1.03:saturation=1.05,noise=alls=6:allf=t+u,format=yuv420p"
+            "scale=5760:3240:flags=lanczos,zoompan=z='{breathing}':x='(iw-iw/zoom)/2+{drift_x:.4}*(iw-iw/zoom)*sin(2*PI*on/1800)':y='(ih-ih/zoom)/2+{drift_y:.4}*(ih-ih/zoom)*cos(2*PI*on/1800)':d=1:s={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}:fps={VIDEO_FPS},vignette=PI/6,eq=contrast=1.03:saturation=1.05,noise=alls=6:allf=t+u,format=yuv420p"
         ),
         "-c:v".into(),
         "libx265".into(),
@@ -114,30 +130,42 @@ pub async fn loop_extend_clip(
     run_ffmpeg(&args).await
 }
 
-/// Chain rendered segments into one video with a named xfade transition.
+/// Chain rendered segments into one YouTube-ready video with a named xfade
+/// transition. The final encode is deliberately H.264 rather than HEVC:
+/// YouTube's current upload guidance names H.264 High Profile, progressive
+/// scan, two B frames, a closed GOP, BT.709 and MP4 fast-start.
 ///
 /// `transition` is any ffmpeg xfade name (`fade`, `fadewhite` = light-flash
 /// cut, `wipeleft`, `circleopen`, ...). Offsets use each segment's real
 /// duration (`segment_secs`), so custom scene counts stay frame-accurate.
-/// Final chain encodes one CRF step higher (20) than the segments (18).
 pub async fn xfade_chain(
     segments: &[PathBuf],
     output: &Path,
     transition: &str,
     segment_secs: f64,
+    codec: &str,
 ) -> Result<()> {
-    if segments.len() < 2 {
-        return Err(anyhow!("xfade chain needs at least two segments"));
+    if segments.is_empty() {
+        return Err(anyhow!("video chain needs at least one segment"));
     }
-    let n = segments.len();
-    let offsets: Vec<f64> = (1..n)
-        .map(|k| k as f64 * (segment_secs - XFADE_SECONDS))
-        .collect();
+    let encode_args = final_encode_args(codec)?;
     let mut args: Vec<String> = vec!["-y".into()];
     for s in segments {
         args.push("-i".into());
         args.push(s.display().to_string());
     }
+
+    if segments.len() == 1 {
+        args.extend(encode_args);
+        args.push("-an".into());
+        args.push(output.display().to_string());
+        return run_ffmpeg(&args).await;
+    }
+
+    let n = segments.len();
+    let offsets: Vec<f64> = (1..n)
+        .map(|k| k as f64 * (segment_secs - XFADE_SECONDS))
+        .collect();
     let mut parts = Vec::new();
     let mut prev = "[0:v]".to_string();
     for (i, offset) in offsets.iter().enumerate() {
@@ -152,24 +180,110 @@ pub async fn xfade_chain(
     args.push(parts.join(";"));
     args.push("-map".into());
     args.push(prev);
-    args.extend([
-        "-c:v".into(),
-        "libx265".into(),
-        "-preset".into(),
-        "medium".into(),
-        "-crf".into(),
-        "20".into(),
-        "-pix_fmt".into(),
-        "yuv420p".into(),
-        output.display().to_string(),
-    ]);
+    args.push("-an".into());
+    args.extend(encode_args);
+    args.push(output.display().to_string());
     run_ffmpeg(&args).await
+}
+
+/// Supported final-chain codecs; H.264 is the YouTube-compatible default.
+pub const FINAL_CODEC_CHOICES: &[&str] = &["h264", "hevc", "av1"];
+
+/// Encoding flags shared by the final video chain and single-segment path.
+///
+/// `h264` follows YouTube's upload guidance (High profile, two B frames,
+/// closed GOP, BT.709, MP4 fast-start). `hevc` and `av1` trade some
+/// compatibility for markedly smaller files at comparable quality; callers
+/// targeting YouTube should stick to the default.
+pub fn final_encode_args(codec: &str) -> Result<Vec<String>> {
+    let mut args: Vec<String> = ["-pix_fmt", "yuv420p"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    match codec {
+        "h264" => args.extend([
+            "-c:v".into(),
+            "libx264".into(),
+            "-preset".into(),
+            "medium".into(),
+            "-crf".into(),
+            "18".into(),
+            "-profile:v".into(),
+            "high".into(),
+            "-level:v".into(),
+            "4.2".into(),
+            "-bf".into(),
+            "2".into(),
+            "-g".into(),
+            "60".into(),
+            "-keyint_min".into(),
+            "60".into(),
+            "-flags".into(),
+            "+cgop".into(),
+        ]),
+        "hevc" => args.extend([
+            "-c:v".into(),
+            "libx265".into(),
+            "-preset".into(),
+            "medium".into(),
+            "-crf".into(),
+            "20".into(),
+            "-tag:v".into(),
+            "hvc1".into(),
+            "-bf".into(),
+            "2".into(),
+            "-g".into(),
+            "60".into(),
+            "-keyint_min".into(),
+            "60".into(),
+            "-flags".into(),
+            "+cgop".into(),
+        ]),
+        "av1" => args.extend([
+            "-c:v".into(),
+            "libsvtav1".into(),
+            "-preset".into(),
+            "8".into(),
+            "-crf".into(),
+            "30".into(),
+            // tune=0 (VBR-friendly) without synthetic grain; grain estimation
+            // costs encoder time and meditation visuals carry no real grain.
+            "-svtav1-params".into(),
+            "tune=0:film-grain=0".into(),
+            "-g".into(),
+            "60".into(),
+            "-bf".into(),
+            "2".into(),
+        ]),
+        other => {
+            anyhow::bail!(
+                "unsupported video codec {other:?} (choose from {FINAL_CODEC_CHOICES:?})"
+            );
+        }
+    }
+    args.extend([
+        "-colorspace".into(),
+        "bt709".into(),
+        "-color_primaries".into(),
+        "bt709".into(),
+        "-color_trc".into(),
+        "bt709".into(),
+        "-movflags".into(),
+        "+faststart".into(),
+    ]);
+    Ok(args)
+}
+
+/// H.264 variant used by the single-segment and transcode paths.
+fn youtube_video_encode_args() -> Vec<String> {
+    final_encode_args("h264").expect("h264 args are always valid")
 }
 
 /// Mux a rendered video with the generated audio track.
 ///
-/// `-tag:v hvc1` keeps HEVC-in-mp4 playable outside ffplay. Video stream is
-/// copied untouched; audio is loudness-normalized and trimmed to `total_secs`.
+/// The chain is already H.264; this step only adds stereo AAC-LC at 48 kHz,
+/// applies a conservative music loudness target, and puts the MP4 index first
+/// for faster YouTube/browser playback. Audio is trimmed to `total_secs`.
 pub fn mux_args(video: &Path, audio: &Path, output: &Path, total_secs: f64) -> Vec<String> {
     vec![
         "-y".into(),
@@ -183,21 +297,41 @@ pub fn mux_args(video: &Path, audio: &Path, output: &Path, total_secs: f64) -> V
         "1:a".into(),
         "-c:v".into(),
         "copy".into(),
-        "-tag:v".into(),
-        "hvc1".into(),
         "-af".into(),
-        "loudnorm=I=-16:TP=-1.5:LRA=11".into(),
+        "loudnorm=I=-14:TP=-1:LRA=11".into(),
         "-c:a".into(),
         "aac".into(),
+        "-profile:a".into(),
+        "aac_low".into(),
         "-b:a".into(),
-        "192k".into(),
+        "384k".into(),
         "-ar".into(),
         "48000".into(),
+        "-ac".into(),
+        "2".into(),
+        "-movflags".into(),
+        "+faststart".into(),
         "-shortest".into(),
         "-t".into(),
         format!("{total_secs:.3}"),
         output.display().to_string(),
     ]
+}
+
+/// YouTube-compatible H.264 re-encode args (for HEVC → AVC compat).
+///
+/// Audio is passed through when already AAC (as produced by
+/// `mux_video_audio`).
+pub fn youtube_h264_args(input: &Path, output: &Path) -> Vec<String> {
+    let mut args = vec!["-y".into(), "-i".into(), input.display().to_string()];
+    args.extend(youtube_video_encode_args());
+    args.extend(["-c:a".into(), "copy".into(), output.display().to_string()]);
+    args
+}
+
+/// Re-encode a HEVC video to YouTube-safe H.264.
+pub async fn transcode_to_h264(input: &Path, output: &Path) -> Result<()> {
+    run_ffmpeg(&youtube_h264_args(input, output)).await
 }
 
 /// Execute the mux plan.
@@ -284,16 +418,18 @@ mod tests {
         assert!(vf.contains("noise=alls=6:allf=t+u"));
         assert!(vf.contains("s=1920x1080"));
         assert!(vf.contains("fps=30"));
-        assert!(vf.contains("z='-0.03+0.03*cos"));
+        // v3: valid zoom stays in the 1.0–1.028 range for an inhale.
+        assert!(vf.contains("z='1.0+0.028*(1.0-cos(2*PI*on/900))/2'"));
+        assert!(vf.contains("cos(2*PI*on/900)"));
+        assert!(vf.contains("sin(2*PI*on/1800)"), "pan drift missing: {vf}");
         assert!(args.contains(&"libx265".to_string()));
         let crf = args.iter().position(|a| a == "-crf").unwrap();
         assert_eq!(args[crf + 1], "18");
-        // even index inhales from min zoom; odd exhales
+        // even inhales from min zoom; odd exhales
         let odd = zoompan_args(1, 61.8);
         let vf_odd = odd.iter().find(|a| a.contains("zoompan")).unwrap();
-        assert!(vf_odd.contains("z='+0.03+0.03*cos"));
+        assert!(vf_odd.contains("z='1.0+0.029*(1.0+cos(2*PI*on/900))/2'"));
     }
-
     #[test]
     fn loop_extend_args_drop_audio_use_blend_and_x265() {
         let args = loop_extend_args(Path::new("in.mp4"), Path::new("out.mp4"), 61.8, 5.0);
@@ -316,15 +452,18 @@ mod tests {
     }
 
     #[test]
-    fn mux_maps_video_and_audio_with_loudnorm_and_hvc1() {
+    fn mux_maps_video_and_audio_with_youtube_audio_settings() {
         let args = mux_args(
             Path::new("v.mp4"),
             Path::new("a.mp3"),
             Path::new("o.mp4"),
             600.0,
         );
-        assert!(args.contains(&"loudnorm=I=-16:TP=-1.5:LRA=11".to_string()));
-        assert!(args.contains(&"hvc1".to_string()));
+        assert!(args.contains(&"loudnorm=I=-14:TP=-1:LRA=11".to_string()));
+        assert!(args.contains(&"384k".to_string()));
+        assert!(args.contains(&"48000".to_string()));
+        assert!(args.contains(&"+faststart".to_string()));
+        assert!(!args.contains(&"hvc1".to_string()));
         assert_eq!(args.iter().filter(|a| a.as_str() == "-map").count(), 2);
         let ti = args.iter().position(|a| a == "-t").unwrap();
         assert_eq!(args[ti + 1], "600.000");
@@ -336,5 +475,63 @@ mod tests {
         let seg = zoompan_args(0, 61.8);
         let seg_crf = seg.iter().position(|a| a == "-crf").unwrap();
         assert_eq!(seg[seg_crf + 1], "18");
+    }
+    #[test]
+    fn youtube_h264_uses_x264_crf18_and_copy_audio() {
+        let args = youtube_h264_args(Path::new("in.mp4"), Path::new("out.mp4"));
+        assert!(args.contains(&"libx264".to_string()));
+        let crf = args.iter().position(|a| a == "-crf").unwrap();
+        assert_eq!(args[crf + 1], "18");
+        assert!(args.contains(&"copy".to_string()));
+        assert!(args.contains(&"yuv420p".to_string()));
+        assert!(args.contains(&"high".to_string()));
+        assert!(args.contains(&"+faststart".to_string()));
+    }
+
+    #[test]
+    fn final_encode_args_h264_follows_youtube_guidance() {
+        let args = final_encode_args("h264").unwrap();
+        assert!(args.contains(&"libx264".to_string()));
+        let crf = args.iter().position(|a| a == "-crf").unwrap();
+        assert_eq!(args[crf + 1], "18");
+        assert!(args.contains(&"high".to_string()));
+        assert!(args.contains(&"+cgop".to_string()));
+        assert!(args.contains(&"bt709".to_string()));
+        assert!(args.contains(&"+faststart".to_string()));
+    }
+
+    #[test]
+    fn final_encode_args_hevc_tags_hvc1() {
+        let args = final_encode_args("hevc").unwrap();
+        assert!(args.contains(&"libx265".to_string()));
+        assert!(args.contains(&"hvc1".to_string()));
+        let crf = args.iter().position(|a| a == "-crf").unwrap();
+        assert_eq!(args[crf + 1], "20");
+        assert!(args.contains(&"+faststart".to_string()));
+    }
+
+    #[test]
+    fn final_encode_args_av1_uses_svtav1_tuned_without_grain() {
+        let args = final_encode_args("av1").unwrap();
+        assert!(args.contains(&"libsvtav1".to_string()));
+        let preset = args.iter().position(|a| a == "-preset").unwrap();
+        assert_eq!(args[preset + 1], "8");
+        let crf = args.iter().position(|a| a == "-crf").unwrap();
+        assert_eq!(args[crf + 1], "30");
+        let params = args.iter().position(|a| a == "-svtav1-params").unwrap();
+        assert_eq!(args[params + 1], "tune=0:film-grain=0");
+    }
+
+    #[test]
+    fn final_encode_args_reject_unknown_codecs() {
+        let err = final_encode_args("mpeg2").unwrap_err();
+        assert!(err.to_string().contains("mpeg2"));
+    }
+
+    #[test]
+    fn final_codec_choices_match_implemented_branches() {
+        for codec in FINAL_CODEC_CHOICES {
+            assert!(final_encode_args(codec).is_ok(), "{codec} not implemented");
+        }
     }
 }
