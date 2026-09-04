@@ -47,7 +47,7 @@ do-music optimize <prompt>
 do-music setup [--api-key ...] [--llm-model ...] [--music-model ...] [--video-model ...]
 do-music providers
 do-music template list|show <name>|new <name>
-do-music video <prompt> [--duration 10m] [--scenes <list.json>] [--audio <track>] [--xfade <name>] [--no-i2v]
+do-music video <prompt> [--duration 10m] [--scenes <list.json>] [--audio <track>] [--xfade <name>] [--quality fast|balanced|high] [--jobs N] [--no-i2v]
 do-music visual <audio> [--style flow|bloom|plasma|waves|rings] [--palette zen|ink|abyss|ember|aurora] [--codec h264|hevc] [--mirror] [--seed 42]
 ```
 
@@ -79,6 +79,21 @@ boundaries stay aligned to the music; a one-scene list is supported too. Use
 `--codec hevc` only when smaller local files matter more than universal
 playback. These choices follow YouTube's current upload guidance (H.264,
 AAC-LC/48 kHz, 4:2:0, and MP4 fast-start).
+
+### Render tiers (`--quality`)
+
+The video path spends nearly all of its wall time in the per-scene animation
+render, so one knob controls the cost/fidelity trade:
+
+| tier | supersample | grain | intermediates | final preset | use |
+|---|---|---|---|---|---|
+| `fast` | 1× (1920×1080) | off | x264 `ultrafast` | `veryfast` | previews, iterating on scene lists |
+| `balanced` *(default)* | 2× (3840×2160) | 5 | x264 `veryfast` | `medium` | normal renders |
+| `high` | 3× (5760×3240) | 6 | x265 `medium` | `slow` | archive / final upload |
+
+`--jobs 0` (the default) renders one fallback segment per CPU core, capped at
+8 so a long scene list does not thrash memory with many 4K scaler buffers.
+
 
 Verified live 2026-08-29: 76.2 s track, 76.0 s 1920x1080 video, six scenes
 (drop-ripple → koi rises → village flyover → bloom → drift → closing ripple
@@ -130,7 +145,7 @@ do-music visual do-music-output/working-calm-10m.mp3 --style flow --palette zen
 - **MiniMax-H3 video returns HTTP 402** ("Insufficient credits") on keys without video credits. `do-music video` tries H3 per scene, prints one warning on the first failure, then renders the remaining scenes with the supersampled ffmpeg fallback — the video never aborts. H3 starts working the moment credits exist.
 - **LLM `MiniMaxAI/MiniMax-M2.7` is intermittently unavailable upstream** (HTTP 429/520/521 observed 2026-08-29). `MiniMaxAI/MiniMax-M3` answered `200 ok` throughout; select it with `GMI_LLM_MODEL=MiniMaxAI/MiniMax-M3` (or `do-music setup --llm-model`). `do-music providers` shows the live status.
 - **MiniMax Week free access ends 2026-09-06.** After that date music generation starts returning 402; the CLI fails loudly with the provider error by design (no silent fallback to a paid model).
-- **Pollinations free tier caps scene stills at 1024×576.** URLs are deterministic (seeded) and double as H3 `first_frame_image`; final quality comes from the 5760×3240 supersample + grain at render, not the source resolution.
+- **Pollinations free tier caps scene stills at 1024×576.** URLs are deterministic (seeded) and double as H3 `first_frame_image`; final quality comes from the supersample + grain at render (3840×2160 on the default `balanced` tier, 5760×3240 on `high`), not the source resolution.
 - **Generative-visual bitrate varies by style** (HEVC CRF 19): the flow style
   lands around 2 Mbps for ambient tracks (particle trails are high-entropy),
   while low-motion styles compress far below the 1.5 Mbps target — expected

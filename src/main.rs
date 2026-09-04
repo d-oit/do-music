@@ -88,12 +88,15 @@ enum CommandKind {
         /// ffmpeg xfade transition between scenes (fade, fadewhite, ...).
         #[arg(long, default_value = "fade")]
         xfade: String,
-        /// Parallel ffmpeg fallback segment renders.
-        #[arg(long, default_value = "2")]
+        /// Parallel ffmpeg fallback segment renders; 0 = one per CPU core.
+        #[arg(long, default_value = "0")]
         jobs: usize,
         /// Final video codec; H.264 is the YouTube-compatible default.
         #[arg(long, default_value = "h264")]
         video_codec: String,
+        /// Render tier: fast (preview), balanced (default), high (archive).
+        #[arg(long, default_value = "balanced")]
+        quality: String,
         /// Fill prompt/duration/instrumental from a named template.
         #[arg(long)]
         template: Option<String>,
@@ -210,6 +213,7 @@ async fn main() -> Result<()> {
             xfade,
             jobs,
             video_codec,
+            quality,
             template,
             optimize: _,
         }) => {
@@ -235,6 +239,7 @@ async fn main() -> Result<()> {
                 xfade,
                 jobs,
                 video_codec,
+                quality,
             };
             video_pipeline::run_video(job).await
         }

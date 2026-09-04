@@ -12,6 +12,7 @@ pub mod duration;
 pub mod encode;
 pub mod plan;
 pub mod providers;
+pub mod quality;
 pub mod render;
 pub mod templates;
 pub mod video;

@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use do_music::config::Settings;
 use do_music::duration::Duration;
 use do_music::providers;
+use do_music::quality::Quality;
 use do_music::render;
 use do_music::video;
 use std::path::{Path, PathBuf};
@@ -30,6 +31,8 @@ pub struct VideoJob {
     pub jobs: usize,
     /// Codec for the final chained video (see render::FINAL_CODEC_CHOICES).
     pub video_codec: String,
+    /// Render tier trading wall-clock time against fidelity.
+    pub quality: String,
 }
 
 /// Orchestrate the highlight video path: scene list (builtin or --scenes),
@@ -38,6 +41,7 @@ pub struct VideoJob {
 /// and images are reused when already present.
 pub(crate) async fn run_video(job: VideoJob) -> Result<()> {
     let settings = Settings::load()?;
+    let quality = Quality::parse(&job.quality)?;
     let dir = PathBuf::from("do-music-output");
     fs::create_dir_all(&dir).await?;
 
@@ -83,11 +87,6 @@ pub(crate) async fn run_video(job: VideoJob) -> Result<()> {
         }
     };
 
-    let frames_dir = match &job.scenes {
-        Some(_) => dir.join("custom-frames"),
-        None => dir.join("monk-frames"),
-    };
-
     // Video: render segments, chain with the transition, mux.
     let final_path = final_path(&dir, &job);
     if let Some(parent) = final_path.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -101,6 +100,7 @@ pub(crate) async fn run_video(job: VideoJob) -> Result<()> {
         audio_path.as_deref(),
         &scene_list,
         &job,
+        quality,
     )
     .await?;
     println!("Done: {}", final_path.display());
@@ -172,6 +172,13 @@ fn video_only_path(dir: &Path, job: &VideoJob) -> PathBuf {
     dir.join(name)
 }
 
+/// Usable CPU count for the fallback render pool.
+fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+}
+
 /// Return true only for a cached segment whose duration matches the plan.
 async fn cached_segment_is_usable(path: &Path, target_secs: f64) -> bool {
     path.exists()
@@ -195,6 +202,7 @@ async fn render_video(
     audio: Option<&Path>,
     scene_list: &video::SceneList,
     job: &VideoJob,
+    quality: Quality,
 ) -> Result<()> {
     // Custom scene list: one segment per listed prompt. Builtin arc: the
     // canonical 10-scene layout scaled to the requested total.
@@ -255,7 +263,7 @@ async fn render_video(
                 if source_secs <= 0.0 {
                     anyhow::bail!("H3 returned a zero-length clip");
                 }
-                render::loop_extend_clip(&h3_raw, &out, seg.duration, source_secs).await
+                render::loop_extend_clip(&h3_raw, &out, seg.duration, source_secs, quality).await
             }
             .await;
             match ai_result {
@@ -276,22 +284,39 @@ async fn render_video(
         }
     }
 
-    // Render fallback segments in bounded-parallel batches.
-    let jobs = job.jobs.max(1);
+    // Render fallback segments with a rolling pool of `jobs` ffmpeg
+    // processes. A fixed-chunk loop would idle every finished worker until
+    // the slowest segment of its batch completed; refilling as soon as one
+    // finishes keeps all cores busy to the end of the queue.
+    //
+    // 0 means "auto": one ffmpeg per core, capped so a long scene list on a
+    // big machine does not thrash memory with many 4K supersample buffers.
+    let jobs = match job.jobs {
+        0 => available_parallelism().clamp(1, 8),
+        n => n,
+    };
     let total = segments.len();
-    for batch in fallback.chunks(jobs) {
-        let mut set = tokio::task::JoinSet::new();
-        for (i, image, out, dur) in batch {
-            let (i, image, out, dur) = (*i, image.clone(), out.clone(), *dur);
-            set.spawn(async move { render::render_zoompan_segment(&image, &out, i, dur).await });
+    let mut done = 0usize;
+    let mut queue = fallback.into_iter();
+    let mut set = tokio::task::JoinSet::new();
+    loop {
+        while set.len() < jobs {
+            let Some((i, image, out, dur)) = queue.next() else {
+                break;
+            };
+            set.spawn(async move {
+                render::render_zoompan_segment(&image, &out, i, dur, quality)
+                    .await
+                    .map(|()| (i, out))
+            });
         }
-        while let Some(res) = set.join_next().await {
-            res.context("fallback render task panicked")??;
-        }
-        for (i, _, out, _) in batch {
-            slots[*i] = Some(out.clone());
-            println!("✓ segment {}/{} (ffmpeg)", i + 1, total);
-        }
+        let Some(res) = set.join_next().await else {
+            break;
+        };
+        let (i, out) = res.context("fallback render task panicked")??;
+        slots[i] = Some(out);
+        done += 1;
+        println!("✓ segment {}/{} (ffmpeg, {done} rendered)", i + 1, total);
     }
     let rendered: Vec<PathBuf> = slots
         .into_iter()
@@ -299,7 +324,15 @@ async fn render_video(
         .collect();
 
     let chained = dir.join("video-xfade.mp4");
-    render::xfade_chain(&rendered, &chained, &job.xfade, seg_secs, &job.video_codec).await?;
+    render::xfade_chain(
+        &rendered,
+        &chained,
+        &job.xfade,
+        seg_secs,
+        &job.video_codec,
+        quality,
+    )
+    .await?;
     match audio {
         Some(audio_path) => {
             render::mux_video_audio(

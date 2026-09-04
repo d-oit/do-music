@@ -20,6 +20,8 @@ Build `do-music` as a small, reliable CLI for GMI Cloud MiniMax Music 3.0.
 - `src/plan.rs` — track planning, `MusicSpec`, section prompts.
 - `src/assembly.rs` — copy/FFmpeg planning + execution.
 - `src/api.rs` — request/response serialization + defensive parsing.
+- `src/quality.rs` — render tiers (`fast`/`balanced`/`high`): supersample factor,
+  scaler, grain, intermediate codec/preset, final preset. Pure data.
 - `src/main.rs` — CLI and orchestration only, plus the network transport (LLM evaluation and GMI music calls).
 - `tests/planning.rs` — deterministic tests; must not call live APIs.
 - `src/visual.rs` — `visual` command plumbing: embedded Python package
