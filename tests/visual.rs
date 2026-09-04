@@ -280,3 +280,86 @@ fn embedded_package_files_are_complete() {
         assert!(!body.trim().is_empty(), "{name} empty");
     }
 }
+
+/// Synthesize a 60 s ambient WAV with known events at 20 s and 40 s, run the
+/// highlight detector on it, and return the detected mark times.
+#[test]
+fn highlight_detector_finds_known_musical_events() {
+    if python_numpy_available().is_none() {
+        println!("skipping: python3/numpy not available");
+        return;
+    }
+    let snippet = r#"
+import json, tempfile, os, wave
+import numpy as np
+from visualizer import highlights
+
+rate = 22050
+t = np.arange(60 * rate) / rate
+sig = 0.15*np.sin(2*np.pi*110*t) + 0.1*np.sin(2*np.pi*220*t)
+sig[int(20*rate):] += 0.35*np.sin(2*np.pi*165*t[int(20*rate):])
+sig[int(40*rate):] += 0.25*np.sin(2*np.pi*3000*t[int(40*rate):])
+sig = np.clip(sig, -1, 1)
+path = os.path.join(tempfile.mkdtemp(), "t.wav")
+w = wave.open(path, "wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+w.writeframes((sig*32767).astype("<i2").tobytes()); w.close()
+
+doc = highlights.analyze(path)
+print(json.dumps([m["time"] for m in doc["marks"]]))
+"#;
+    let out = match run_python(snippet) {
+        Ok(o) => o,
+        Err(e) => panic!("highlight detector failed: {e}"),
+    };
+    let times: Vec<f64> = serde_json::from_str(&out).expect("mark times are JSON");
+    // A swell at 20 s and a bright entry at 40 s must both be found, each
+    // within a second of the truth (the detector compensates group delay).
+    for expected in [20.0_f64, 40.0] {
+        assert!(
+            times.iter().any(|t| (t - expected).abs() < 1.0),
+            "no mark near {expected}s in {times:?}"
+        );
+    }
+}
+
+#[test]
+fn highlight_detector_is_deterministic_and_silence_yields_no_marks() {
+    if python_numpy_available().is_none() {
+        println!("skipping: python3/numpy not available");
+        return;
+    }
+    let snippet = r#"
+import json, tempfile, os, wave
+import numpy as np
+from visualizer import highlights
+
+def render(sig, rate=22050):
+    path = os.path.join(tempfile.mkdtemp(), "t.wav")
+    w = wave.open(path, "wb"); w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+    w.writeframes((np.clip(sig, -1, 1)*32767).astype("<i2").tobytes()); w.close()
+    return path
+
+rate = 22050
+t = np.arange(30 * rate) / rate
+tone = 0.2*np.sin(2*np.pi*220*t)
+a = highlights.analyze(render(tone))
+b = highlights.analyze(render(tone))
+silence = highlights.analyze(render(np.zeros(30*rate)))
+print(json.dumps({
+    "deterministic": a == b,
+    "steady_marks": len(a["marks"]),
+    "silent_marks": len(silence["marks"]),
+}))
+"#;
+    let out = match run_python(snippet) {
+        Ok(o) => o,
+        Err(e) => panic!("highlight detector failed: {e}"),
+    };
+    let v: serde_json::Value = serde_json::from_str(&out).expect("json");
+    assert_eq!(v["deterministic"], serde_json::json!(true));
+    // A steady tone and pure silence have no musical events to cut on:
+    // scores are absolute, so featureless audio must not be stretched into
+    // spurious highlights.
+    assert_eq!(v["steady_marks"], serde_json::json!(0), "steady tone: {out}");
+    assert_eq!(v["silent_marks"], serde_json::json!(0), "silence: {out}");
+}

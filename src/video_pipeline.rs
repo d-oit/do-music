@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use do_music::config::Settings;
 use do_music::duration::Duration;
+use do_music::highlights::Highlights;
 use do_music::providers;
 use do_music::quality::Quality;
 use do_music::render;
@@ -33,6 +34,11 @@ pub struct VideoJob {
     pub video_codec: String,
     /// Render tier trading wall-clock time against fidelity.
     pub quality: String,
+    /// Snap scene cuts to detected musical highlights.
+    pub highlights: bool,
+    /// How far (seconds) a cut may move from its uniform position to reach a
+    /// highlight.
+    pub highlight_window: f64,
 }
 
 /// Orchestrate the highlight video path: scene list (builtin or --scenes),
@@ -172,6 +178,41 @@ fn video_only_path(dir: &Path, job: &VideoJob) -> PathBuf {
     dir.join(name)
 }
 
+/// Analyze `audio` for musical highlights via the embedded python module.
+///
+/// Returns `None` (with a printed note) when python/numpy is unavailable or
+/// the analysis fails: highlight snapping is an enhancement, never a reason
+/// to abort a render that would otherwise succeed.
+async fn detect_highlights(audio: &Path, dir: &Path) -> Option<Highlights> {
+    let run = async {
+        do_music::visual::check_python()?;
+        let package_parent = do_music::visual::ensure_package()?;
+        let wav = dir.join("highlight-analysis.wav");
+        let marks = dir.join("highlight-marks.json");
+        render::materialize_pcm_wav(audio, &wav).await?;
+        let args = do_music::visual::highlight_args(&wav, &marks);
+        let status = tokio::process::Command::new("python3")
+            .args(&args)
+            .env("PYTHONPATH", &package_parent)
+            .status()
+            .await
+            .context("failed to spawn python3 for highlight analysis")?;
+        if !status.success() {
+            anyhow::bail!("highlight analysis exited with {status}");
+        }
+        let text = fs::read_to_string(&marks).await?;
+        let _ = fs::remove_file(&wav).await;
+        Highlights::parse(&text)
+    };
+    match run.await {
+        Ok(h) => Some(h),
+        Err(e) => {
+            println!("⚠ highlight analysis unavailable ({e:#}) — using even scene pacing");
+            None
+        }
+    }
+}
+
 /// Usable CPU count for the fallback render pool.
 fn available_parallelism() -> usize {
     std::thread::available_parallelism()
@@ -212,17 +253,46 @@ async fn render_video(
     };
     let scenes = video::ensure_scene_images(frames_dir, scene_list, scene_count).await?;
     let image_paths: Vec<PathBuf> = scenes.iter().map(|(p, _)| p.clone()).collect();
-    let segments = video::plan_video_segments(
+    let mut segments = video::plan_video_segments(
         &image_paths,
         total_seconds,
         scene_count,
         &scene_list.prompts,
     )?;
-    let seg_secs = segments[0].duration;
-    let seg_dir = dir.join(format!(
-        "video-segments-{}x{:.1}",
-        scene_count, segments[0].duration
-    ));
+
+    // Highlight snapping: move scene cuts onto detected musical moments so
+    // transitions land with the music instead of on a metronome. Segments
+    // become individually-timed; the chain math already handles that.
+    let mut snapped = false;
+    let wants_highlights = job.highlights && scene_count > 1;
+    let detected = match (wants_highlights, audio) {
+        (true, Some(audio_path)) => detect_highlights(audio_path, dir).await,
+        _ => None,
+    };
+    if let Some(marks) = detected {
+        let durations =
+            marks.segment_durations(scene_count, total_seconds as f64, job.highlight_window);
+        let moved = durations
+            .iter()
+            .zip(segments.iter())
+            .filter(|(new, old)| (*new - old.duration).abs() > 0.05)
+            .count();
+        for (seg, secs) in segments.iter_mut().zip(&durations) {
+            seg.duration = *secs;
+        }
+        snapped = moved > 0;
+        println!(
+            "♪ {} highlight marks detected; {moved}/{scene_count} scene cuts snapped to the music",
+            marks.marks.len()
+        );
+    }
+
+    let seg_secs: Vec<f64> = segments.iter().map(|s| s.duration).collect();
+    let seg_dir = dir.join(if snapped {
+        format!("video-segments-{scene_count}x-highlight")
+    } else {
+        format!("video-segments-{}x{:.1}", scene_count, seg_secs[0])
+    });
     fs::create_dir_all(&seg_dir).await?;
 
     // H3 attempts stay sequential: the first failure permanently disables
@@ -328,7 +398,7 @@ async fn render_video(
         &rendered,
         &chained,
         &job.xfade,
-        seg_secs,
+        &seg_secs,
         &job.video_codec,
         quality,
     )

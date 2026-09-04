@@ -97,6 +97,12 @@ enum CommandKind {
         /// Render tier: fast (preview), balanced (default), high (archive).
         #[arg(long, default_value = "balanced")]
         quality: String,
+        /// Cut scenes on even timings instead of snapping to musical highlights.
+        #[arg(long)]
+        no_highlights: bool,
+        /// Seconds a scene cut may move to reach a highlight.
+        #[arg(long, default_value = "8.0")]
+        highlight_window: f64,
         /// Fill prompt/duration/instrumental from a named template.
         #[arg(long)]
         template: Option<String>,
@@ -214,6 +220,8 @@ async fn main() -> Result<()> {
             jobs,
             video_codec,
             quality,
+            no_highlights,
+            highlight_window,
             template,
             optimize: _,
         }) => {
@@ -240,6 +248,8 @@ async fn main() -> Result<()> {
                 jobs,
                 video_codec,
                 quality,
+                highlights: !no_highlights,
+                highlight_window,
             };
             video_pipeline::run_video(job).await
         }

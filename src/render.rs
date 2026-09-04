@@ -163,13 +163,14 @@ pub async fn loop_extend_clip(
 /// scan, two B frames, a closed GOP, BT.709 and MP4 fast-start.
 ///
 /// `transition` is any ffmpeg xfade name (`fade`, `fadewhite` = light-flash
-/// cut, `wipeleft`, `circleopen`, ...). Offsets use each segment's real
-/// duration (`segment_secs`), so custom scene counts stay frame-accurate.
+/// cut, `wipeleft`, `circleopen`, ...). `segment_secs` carries each segment's
+/// real duration, so both the uniform layout and highlight-snapped scenes of
+/// differing lengths stay frame-accurate.
 pub async fn xfade_chain(
     segments: &[PathBuf],
     output: &Path,
     transition: &str,
-    segment_secs: f64,
+    segment_secs: &[f64],
     codec: &str,
     quality: Quality,
 ) -> Result<()> {
@@ -190,10 +191,14 @@ pub async fn xfade_chain(
         return run_ffmpeg(&args).await;
     }
 
-    let n = segments.len();
-    let offsets: Vec<f64> = (1..n)
-        .map(|k| k as f64 * (segment_secs - XFADE_SECONDS))
-        .collect();
+    if segment_secs.len() != segments.len() {
+        return Err(anyhow!(
+            "xfade chain got {} segments but {} durations",
+            segments.len(),
+            segment_secs.len()
+        ));
+    }
+    let offsets = crate::highlights::variable_xfade_offsets(segment_secs);
     let mut parts = Vec::new();
     let mut prev = "[0:v]".to_string();
     for (i, offset) in offsets.iter().enumerate() {

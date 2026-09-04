@@ -47,7 +47,7 @@ do-music optimize <prompt>
 do-music setup [--api-key ...] [--llm-model ...] [--music-model ...] [--video-model ...]
 do-music providers
 do-music template list|show <name>|new <name>
-do-music video <prompt> [--duration 10m] [--scenes <list.json>] [--audio <track>] [--xfade <name>] [--quality fast|balanced|high] [--jobs N] [--no-i2v]
+do-music video <prompt> [--duration 10m] [--scenes <list.json>] [--audio <track>] [--xfade <name>] [--quality fast|balanced|high] [--jobs N] [--no-highlights] [--no-i2v]
 do-music visual <audio> [--style flow|bloom|plasma|waves|rings] [--palette zen|ink|abyss|ember|aurora] [--codec h264|hevc] [--mirror] [--seed 42]
 ```
 
@@ -79,6 +79,35 @@ boundaries stay aligned to the music; a one-scene list is supported too. Use
 `--codec hevc` only when smaller local files matter more than universal
 playback. These choices follow YouTube's current upload guidance (H.264,
 AAC-LC/48 kHz, 4:2:0, and MP4 fast-start).
+
+### Highlight-aware scene cuts
+
+Scene transitions snap to musical events instead of a metronome. The
+embedded analyzer (`visualizer/highlights.py`, numpy-only) scores every
+frame from three deterministic features:
+
+- **onset strength** (spectral flux) — percussive entries;
+- **energy lift** over a 2 s horizon — swells and section changes, the
+  useful signal in ambient material with no transients;
+- **brightness lift** (spectral centroid) — pads opening up, strings
+  entering, changes that carry no extra energy.
+
+Each ideal scene boundary then snaps to the strongest mark within
+`--highlight-window` seconds (default 8), subject to every segment staying
+long enough to crossfade. Boundaries with no nearby mark keep their even
+position, and the durations always sum back to the exact track length, so
+the video still lands on the music.
+
+Scores are absolute rather than max-normalized: a featureless track yields
+*no* marks rather than having its noise stretched into invented highlights.
+Analysis is best-effort — if python3/numpy is missing or the analysis
+fails, the render prints a note and falls back to even pacing.
+
+```bash
+do-music video --audio track.mp3 --scenes scenes.json      # snapping on (default)
+do-music video --audio track.mp3 --no-highlights           # even pacing
+do-music video --audio track.mp3 --highlight-window 15     # allow bigger moves
+```
 
 ### Render tiers (`--quality`)
 
