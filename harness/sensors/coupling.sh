@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Sensor: coupling data (advisory). Fan-in/fan-out per module + hub detection.
-# Raw numbers are noisy (see Böckeler): use them for review triage, not as truth.
+# Fan-in counts *import edges* — module path references (`mod::`, `crate::mod`,
+# `do_music::mod`) and `mod` declarations — not word mentions, so prose and
+# same-named fields do not inflate the numbers. Raw numbers are still noisy
+# (see Böckeler): use them for review triage, not as truth.
 set -uo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 . "$here/../lib.sh"
@@ -24,7 +27,9 @@ for f in $file_list; do
     fin=0
     for g in $file_list; do
         [ "$g" = "$f" ] && continue
-        grep -qw "$mod" "$g" 2>/dev/null && fin=$((fin + 1))
+        # An import edge: any path through the module (`mod::`, `crate::mod::`,
+        # `do_music::mod`) or a `mod` declaration in a parent file.
+        grep -qE "\b${mod}::|^[[:space:]]*(pub )?mod ${mod}[ ;]" "$g" 2>/dev/null && fin=$((fin + 1))
     done
     detail="$detail$(basename "$f")(in=$fin,out=$fan_out) "
     if [ "$fin" -ge "$HUB_FAN_IN" ]; then
