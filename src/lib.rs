@@ -12,6 +12,7 @@ pub mod autotune;
 pub mod config;
 pub mod duration;
 pub mod encode;
+pub mod h3;
 pub mod highlights;
 pub mod motion;
 pub mod plan;

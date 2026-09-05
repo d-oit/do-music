@@ -1,6 +1,6 @@
 //! Highlight-video pipeline: scene planning, per-scene cinematic animation,
 //! transition chain, and final audio mux. Orchestration only; network
-//! transports live in `providers.rs` and the music-driven inputs (art
+//! transports live in `providers.rs`/`h3.rs` and the music-driven inputs (art
 //! direction, highlight analysis, autotune write-back) in `video_inputs.rs`.
 //!
 //! H3 returns short clips, so successful AI shots are loop-extended to the
@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use do_music::autotune::Memory;
 use do_music::config::Settings;
 use do_music::duration::Duration;
+use do_music::h3;
 use do_music::motion::{self, Energy};
-use do_music::providers;
 use do_music::quality::Quality;
 use do_music::render;
 use do_music::video;
@@ -351,7 +351,7 @@ async fn render_video(
             let h3_raw = seg_dir.join(format!("seg-{:02}.h3.mp4", i + 1));
             let ai_result = async {
                 if !h3_raw.exists() {
-                    providers::animate_h3(
+                    h3::animate_h3(
                         &settings.api_key,
                         &settings.music_url,
                         &job.video_model,
