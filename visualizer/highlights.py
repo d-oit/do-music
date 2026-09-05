@@ -138,7 +138,35 @@ def pick_marks(
     ]
 
 
-def analyze(path: str) -> dict:
+def energy_profile(path: str, buckets: int) -> list[float]:
+    """Mean musical energy per equal time bucket, each normalized to 0..1.
+
+    The video planner uses this to give each scene a motion budget that
+    matches the music underneath it, so a swelling passage gets a livelier
+    camera move than a sparse one. Normalized against the track's own range
+    (not an absolute scale) because meditation music is quiet throughout and
+    what matters is its *relative* shape.
+    """
+    if buckets < 1:
+        return []
+    features = analysis.frame_features(path)
+    energy = features.mean(axis=1)
+    if len(energy) == 0:
+        return [0.35] * buckets
+    edges = np.linspace(0, len(energy), buckets + 1).astype(int)
+    means = np.array(
+        [
+            energy[a:b].mean() if b > a else energy[min(a, len(energy) - 1)]
+            for a, b in zip(edges[:-1], edges[1:])
+        ]
+    )
+    lo, hi = float(means.min()), float(means.max())
+    if hi - lo < 1e-9:
+        return [0.35] * buckets
+    return [round(float(v), 4) for v in (means - lo) / (hi - lo)]
+
+
+def analyze(path: str, buckets: int = 0) -> dict:
     """Full highlight document for `path` (a 22050 Hz mono PCM WAV)."""
     score, hop_rate = highlight_scores(path)
     samples, rate = analysis.load_wav_pcm(path)
@@ -150,20 +178,30 @@ def analyze(path: str) -> dict:
     lag = _LIFT_SECONDS / 2.0
     for mark in marks:
         mark["time"] = round(max(0.0, mark["time"] - lag), 3)
-    return {
+    doc = {
         "duration": round(len(samples) / rate, 3),
         "hop_rate": round(hop_rate, 4),
         "marks": marks,
+        "mean_energy": round(float(np.clip(score.mean() * 4.0, 0.0, 1.0)), 4),
     }
+    if buckets > 0:
+        doc["scene_energy"] = energy_profile(path, buckets)
+    return doc
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="do-music-highlights")
     parser.add_argument("audio", help="PCM WAV (22050 Hz mono) from the Rust side")
     parser.add_argument("-o", "--output", help="write JSON here (default: stdout)")
+    parser.add_argument(
+        "--buckets",
+        type=int,
+        default=0,
+        help="also emit per-scene energy split into this many equal buckets",
+    )
     args = parser.parse_args(argv)
 
-    doc = analyze(args.audio)
+    doc = analyze(args.audio, args.buckets)
     text = json.dumps(doc, indent=2)
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:

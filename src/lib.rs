@@ -6,11 +6,15 @@
 //! handling, templates, video planning and FFmpeg arg building.
 
 pub mod api;
+pub mod artdirection;
 pub mod assembly;
+pub mod autotune;
 pub mod config;
 pub mod duration;
 pub mod highlights;
 pub mod encode;
+pub mod highlights;
+pub mod motion;
 pub mod plan;
 pub mod providers;
 pub mod quality;

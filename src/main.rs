@@ -4,6 +4,7 @@
 //! lives in `video_pipeline.rs`.
 
 mod commands;
+mod video_inputs;
 mod video_pipeline;
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
@@ -100,6 +101,15 @@ enum CommandKind {
         /// Cut scenes on even timings instead of snapping to musical highlights.
         #[arg(long)]
         no_highlights: bool,
+        /// Skip LLM art direction and use the builtin monk scene arc.
+        #[arg(long)]
+        no_art_direction: bool,
+        /// Ground art direction in live web research about the musical style.
+        #[arg(long)]
+        research: bool,
+        /// Do not read or write the self-tuning render memory.
+        #[arg(long)]
+        no_autotune: bool,
         /// Seconds a scene cut may move to reach a highlight.
         #[arg(long, default_value = "8.0")]
         highlight_window: f64,
@@ -221,6 +231,9 @@ async fn main() -> Result<()> {
             video_codec,
             quality,
             no_highlights,
+            no_art_direction,
+            research,
+            no_autotune,
             highlight_window,
             template,
             optimize: _,
@@ -249,6 +262,9 @@ async fn main() -> Result<()> {
                 video_codec,
                 quality,
                 highlights: !no_highlights,
+                art_direct: !no_art_direction,
+                research,
+                autotune: !no_autotune,
                 highlight_window,
             };
             video_pipeline::run_video(job).await

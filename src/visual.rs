@@ -127,14 +127,19 @@ pub fn python_args(
 
 /// Build the `python3 -m visualizer.highlights` argv for `wav`, writing the
 /// highlight JSON document to `out`.
-pub fn highlight_args(wav: &Path, out: &Path) -> Vec<String> {
-    vec![
+pub fn highlight_args(wav: &Path, out: &Path, buckets: usize) -> Vec<String> {
+    let mut args = vec![
         "-m".to_string(),
         "visualizer.highlights".to_string(),
         wav.display().to_string(),
         "-o".to_string(),
         out.display().to_string(),
-    ]
+    ];
+    if buckets > 0 {
+        args.push("--buckets".to_string());
+        args.push(buckets.to_string());
+    }
+    args
 }
 
 /// Verify `python3` can import numpy; return its version banner.
@@ -217,11 +222,14 @@ mod tests {
 
     #[test]
     fn highlight_args_target_the_highlights_module() {
-        let args = highlight_args(Path::new("/tmp/a.wav"), Path::new("/tmp/marks.json"));
+        let args = highlight_args(Path::new("/tmp/a.wav"), Path::new("/tmp/marks.json"), 0);
         let text = args.join(" ");
         assert!(text.contains("-m visualizer.highlights"), "{text}");
         assert!(text.contains("/tmp/a.wav"));
         assert!(text.contains("-o /tmp/marks.json"));
+        assert!(!text.contains("--buckets"), "no buckets when zero: {text}");
+        let with = highlight_args(Path::new("/tmp/a.wav"), Path::new("/tmp/m.json"), 10).join(" ");
+        assert!(with.contains("--buckets 10"), "{with}");
     }
 
     #[test]

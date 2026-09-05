@@ -47,7 +47,7 @@ do-music optimize <prompt>
 do-music setup [--api-key ...] [--llm-model ...] [--music-model ...] [--video-model ...]
 do-music providers
 do-music template list|show <name>|new <name>
-do-music video <prompt> [--duration 10m] [--scenes <list.json>] [--audio <track>] [--xfade <name>] [--quality fast|balanced|high] [--jobs N] [--no-highlights] [--no-i2v]
+do-music video <prompt> [--duration 10m] [--scenes <list.json>] [--audio <track>] [--xfade <name>] [--quality fast|balanced|high] [--jobs N] [--research] [--no-highlights] [--no-art-direction] [--no-autotune] [--no-i2v]
 do-music visual <audio> [--style flow|bloom|plasma|waves|rings] [--palette zen|ink|abyss|ember|aurora] [--codec h264|hevc] [--mirror] [--seed 42]
 ```
 
@@ -79,6 +79,41 @@ boundaries stay aligned to the music; a one-scene list is supported too. Use
 `--codec hevc` only when smaller local files matter more than universal
 playback. These choices follow YouTube's current upload guidance (H.264,
 AAC-LC/48 kHz, 4:2:0, and MP4 fast-start).
+
+### Music-driven art direction
+
+By default the video is designed from the music rather than from a fixed
+story. The LLM acts as art director and returns a visual brief — palette,
+rendering style, negative prompt and one image prompt per scene forming a
+beginning/development/resolution arc — which feeds the Pollinations stills
+and the colour grade.
+
+`--research` additionally searches the web for visual references for the
+musical style and distils them into the brief. Both steps are best-effort:
+a failure prints a note and falls back to the builtin monk arc, so a render
+never dies because art direction was unavailable. `--no-art-direction`
+restores the old fixed arc.
+
+### Cinematic motion
+
+Scenes no longer share one breathing zoom. Each gets a shot from a
+vocabulary — `breathe`, `push-in`, `pull-out`, `drift`, `orbit`, `hold` —
+picked by a deterministic rotation that opens and closes on the calmest
+move. Pace and travel scale with the musical energy measured *under that
+scene*, and each shot carries an atmosphere pass (vignette, S-curve grade,
+energy-keyed warmth, optional grain). Transitions vary too: a peak musical
+accent gets a light flash, a moderate one a soft wipe, the rest a dissolve.
+
+### Self-tuning renders (`--no-autotune` to disable)
+
+After each render do-music measures how much the finished picture actually
+moves and compares it against the music's own energy, appending a record to
+`do-music-output/render-memory.json` (capped at 50 entries, no database).
+Renders that came out consistently flatter than their music raise the next
+run's motion bias; busier ones lower it. The bias is damped and clamped to
+0.6–1.5 so it converges instead of oscillating, and history is matched by
+genre once there is enough of it. A missing or corrupt memory file is
+treated as empty.
 
 ### Highlight-aware scene cuts
 

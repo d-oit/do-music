@@ -30,6 +30,12 @@ pub struct Highlights {
     /// Candidate cut points, ascending by time.
     #[serde(default)]
     pub marks: Vec<Mark>,
+    /// Mean musical energy over the track, 0..1.
+    #[serde(default)]
+    pub mean_energy: f64,
+    /// Per-scene energy (one bucket per planned scene), each 0..1.
+    #[serde(default)]
+    pub scene_energy: Vec<f64>,
 }
 
 /// A segment must keep enough body to read as a scene rather than a flash.
@@ -41,6 +47,31 @@ pub fn min_segment_seconds() -> f64 {
 }
 
 impl Highlights {
+    /// Energy for scene `index`, falling back to the track mean and then to
+    /// a calm default when the analyzer supplied no profile.
+    pub fn energy_for(&self, index: usize) -> f64 {
+        self.scene_energy
+            .get(index)
+            .copied()
+            .filter(|v| v.is_finite())
+            .or(Some(self.mean_energy).filter(|v| v.is_finite() && *v > 0.0))
+            .unwrap_or(0.35)
+            .clamp(0.0, 1.0)
+    }
+
+    /// Strength of the cut that opens scene `index` (0 for the first).
+    pub fn cut_strength(&self, index: usize) -> f64 {
+        if index == 0 {
+            return 0.0;
+        }
+        self.marks
+            .get(index - 1)
+            .map(|m| m.strength)
+            .filter(|v| v.is_finite())
+            .unwrap_or(0.0)
+    }
+}
+
     /// Parse the python highlight document.
     pub fn parse(text: &str) -> Result<Self> {
         let mut doc: Self =
@@ -166,6 +197,8 @@ mod tests {
                 .iter()
                 .map(|&(time, strength)| Mark { time, strength })
                 .collect(),
+            mean_energy: 0.0,
+            scene_energy: Vec::new(),
         }
     }
 
@@ -180,6 +213,25 @@ mod tests {
         assert_eq!(h.marks.len(), 2);
         assert_eq!(h.marks[0].time, 20.0);
         assert_eq!(h.marks[1].time, 40.0);
+    }
+
+    #[test]
+    fn energy_falls_back_through_profile_then_mean_then_default() {
+        let mut h = doc(60.0, &[]);
+        assert!((h.energy_for(0) - 0.35).abs() < 1e-9, "default");
+        h.mean_energy = 0.6;
+        assert!((h.energy_for(3) - 0.6).abs() < 1e-9, "track mean");
+        h.scene_energy = vec![0.1, 0.9];
+        assert!((h.energy_for(1) - 0.9).abs() < 1e-9, "per-scene");
+        assert!((h.energy_for(5) - 0.6).abs() < 1e-9, "past the profile");
+    }
+
+    #[test]
+    fn cut_strength_is_zero_for_the_opening_scene() {
+        let h = doc(60.0, &[(20.0, 0.4), (40.0, 1.0)]);
+        assert_eq!(h.cut_strength(0), 0.0);
+        assert!((h.cut_strength(1) - 0.4).abs() < 1e-9);
+        assert_eq!(h.cut_strength(99), 0.0);
     }
 
     #[test]

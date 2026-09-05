@@ -15,61 +15,47 @@ use crate::encode::{final_encode_args, youtube_video_encode_args};
 use crate::quality::Quality;
 use crate::video::{OUTPUT_HEIGHT, OUTPUT_WIDTH, VIDEO_FPS, XFADE_SECONDS};
 
-/// Pan drift as a fraction of the available zoom crop margin.
+/// Render one fallback segment with a default calm shot.
 ///
-/// The pan is centered at `margin/2` and the valid range is `[0, margin]`,
-/// so anything above 0.5 is silently clamped by zoompan.
-const DRIFT_AMPLITUDE: f64 = 0.45;
+/// Kept for callers without a music-driven plan; the video pipeline uses
+/// `render_shot_segment` with a `Shot` chosen per scene.
+pub async fn render_zoompan_segment(
+    image: &Path,
+    output: &Path,
+    scene_index: usize,
+    duration_secs: f64,
+    quality: Quality,
+) -> Result<()> {
+    let shot = crate::motion::plan_shot(scene_index, crate::motion::Energy::new(0.35), 0);
+    render_shot_segment(image, output, &shot, duration_secs, quality).await
+}
 
-/// FFmpeg args that render one fallback (Zoompan) segment.
-///
-/// Cost model: `zoompan` reads a supersampled source once per output frame,
-/// so the scaler dominates this filter chain. The supersample factor is
-/// therefore tier-driven (`Quality::supersample`) rather than the old fixed
-/// 5760x3240; `balanced` (2x = 3840x2160) keeps the anti-jitter benefit at
-/// roughly 4/9 of the pixel throughput.
-///
-/// Motion: a 30 s breathing cycle zooming 1.00-1.032 with cosine easing plus
-/// a deterministic per-scene pan drift (60 s period) over the available zoom
-/// crop, so the source is never read outside its bounds. Meditation
-/// stillness is preserved; the eye tracks motion without feeling `Ken Burns`.
-///
-/// v3 (2026-09-04): tier-driven supersample/scaler/grain, and the still is
-/// decoded once (`-framerate` on the loop input) instead of being re-fed at
-/// output rate.
-pub fn zoompan_args(scene_index: usize, duration_secs: f64, quality: Quality) -> Vec<String> {
-    // Alternating inhale/exhale per scene; slight per-scene period/amplitude
-    // jitter avoids the "metronome" feel when chaining 10x61.8s segments.
-    let inhale = scene_index.is_multiple_of(2);
-    // Deterministic drift: scene_index hashes to an angle, keeping renders
-    // reproducible. The multiplier scales the available crop margin, and the
-    // pan is centered at half that margin, so the amplitude must stay <= 0.5
-    // or zoompan clamps at the bounds and the drift visibly stalls at the
-    // extremes of every cycle. `DRIFT_AMPLITUDE` keeps a safety margin.
-    let drift_deg = (scene_index as f64 * 47.0) % 360.0;
-    let drift_rad = drift_deg.to_radians();
-    let drift_x = drift_rad.cos() * DRIFT_AMPLITUDE;
-    let drift_y = drift_rad.sin() * DRIFT_AMPLITUDE;
-    // Per-scene breathing amplitude 0.028-0.032 (instead of fixed 0.03).
-    let amp = 0.028 + (scene_index as f64 % 5.0) * 0.001;
-    let breathing = if inhale {
-        format!("1.0+{amp:.3}*(1.0-cos(2*PI*on/900))/2")
-    } else {
-        format!("1.0+{amp:.3}*(1.0+cos(2*PI*on/900))/2")
-    };
-    let ss = quality.supersample();
-    let (sw, sh) = (OUTPUT_WIDTH * ss, OUTPUT_HEIGHT * ss);
-    let flags = quality.scale_flags();
-    let grain = match quality.grain() {
-        0 => String::new(),
-        g => format!(",noise=alls={g}:allf=t+u"),
-    };
-    let vf = format!(
-        "scale={sw}:{sh}:flags={flags},zoompan=z='{breathing}':x='(iw-iw/zoom)/2+{drift_x:.4}*(iw-iw/zoom)*sin(2*PI*on/1800)':y='(ih-ih/zoom)/2+{drift_y:.4}*(ih-ih/zoom)*cos(2*PI*on/1800)':d=1:s={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}:fps={VIDEO_FPS},vignette=PI/6,eq=contrast=1.03:saturation=1.05{grain},format=yuv420p"
-    );
+/// Render one scene with a planned cinematic shot (camera move + atmosphere).
+pub async fn render_shot_segment(
+    image: &Path,
+    output: &Path,
+    shot: &crate::motion::Shot,
+    duration_secs: f64,
+    quality: Quality,
+) -> Result<()> {
+    let args: Vec<String> = shot_args(shot, duration_secs, quality)
+        .into_iter()
+        .map(|a| {
+            a.replace("{input}", &image.display().to_string())
+                .replace("{output}", &output.display().to_string())
+        })
+        .collect();
+    run_ffmpeg(&args).await
+}
+
+/// FFmpeg args rendering one scene from a planned `Shot`.
+pub fn shot_args(
+    shot: &crate::motion::Shot,
+    duration_secs: f64,
+    quality: Quality,
+) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-y".into(),
-        // Decode the still once and let zoompan generate the timeline.
         "-loop".into(),
         "1".into(),
         "-framerate".into(),
@@ -79,30 +65,12 @@ pub fn zoompan_args(scene_index: usize, duration_secs: f64, quality: Quality) ->
         "-t".into(),
         format!("{duration_secs:.3}"),
         "-vf".into(),
-        vf,
+        crate::motion::filter_chain(shot, quality, duration_secs),
         "-an".into(),
     ];
     args.extend(quality.intermediate_encode_args());
     args.push("{output}".into());
     args
-}
-
-/// Render one fallback segment with FFmpeg (breathing zoompan).
-pub async fn render_zoompan_segment(
-    image: &Path,
-    output: &Path,
-    scene_index: usize,
-    duration_secs: f64,
-    quality: Quality,
-) -> Result<()> {
-    let args: Vec<String> = zoompan_args(scene_index, duration_secs, quality)
-        .into_iter()
-        .map(|a| {
-            a.replace("{input}", &image.display().to_string())
-                .replace("{output}", &output.display().to_string())
-        })
-        .collect();
-    run_ffmpeg(&args).await
 }
 
 /// Extend a short H3 clip (5 s) to `target_secs` by looping it.
@@ -174,6 +142,24 @@ pub async fn xfade_chain(
     codec: &str,
     quality: Quality,
 ) -> Result<()> {
+    xfade_chain_varied(segments, output, &[], transition, segment_secs, codec, quality).await
+}
+
+/// Chain segments using a per-cut transition list.
+///
+/// `transitions[i]` names the transition into segment `i + 1`; when the list
+/// is shorter than the cut count the `fallback` name is used, so a caller
+/// with no per-cut plan keeps the old single-transition behaviour.
+#[allow(clippy::too_many_arguments)] // one ffmpeg invocation's worth of knobs
+pub async fn xfade_chain_varied(
+    segments: &[PathBuf],
+    output: &Path,
+    transitions: &[String],
+    fallback: &str,
+    segment_secs: &[f64],
+    codec: &str,
+    quality: Quality,
+) -> Result<()> {
     if segments.is_empty() {
         return Err(anyhow!("video chain needs at least one segment"));
     }
@@ -203,8 +189,9 @@ pub async fn xfade_chain(
     let mut prev = "[0:v]".to_string();
     for (i, offset) in offsets.iter().enumerate() {
         let out = format!("[v{}]", i + 1);
+        let name = transitions.get(i).map(String::as_str).unwrap_or(fallback);
         parts.push(format!(
-            "{prev}[{}:v]xfade=transition={transition}:duration={XFADE_SECONDS}:offset={offset:.3}{out}",
+            "{prev}[{}:v]xfade=transition={name}:duration={XFADE_SECONDS}:offset={offset:.3}{out}",
             i + 1
         ));
         prev = out;
@@ -325,6 +312,62 @@ pub async fn materialize_pcm_wav(input: &Path, output: &Path) -> Result<()> {
     run_ffmpeg(&args).await
 }
 
+/// Raw inter-frame luma delta treated as maximum visual motion.
+///
+/// See `measure_motion` for how this was calibrated.
+pub const MOTION_FULL_SCALE: f64 = 0.5;
+
+/// Mean absolute frame-to-frame luma change of a video, normalized to 0..1.
+///
+/// This is the autotune feedback signal: how much the finished picture
+/// actually moves. Sampled at 2 fps on a tiny 64x36 grayscale decode, so a
+/// ten-minute video costs well under a second to measure.
+///
+/// `MOTION_FULL_SCALE` maps this raw signal onto 0..1. It is calibrated,
+/// not guessed: rendering the whole move vocabulary at 2 fps/64x36 gives a
+/// mean inter-frame luma delta of ~0.011 for a static `hold`, ~0.16-0.35
+/// for `breathe`, and ~0.32-0.50 for an energetic `push-in`. Half a grey
+/// level per pixel per sample is therefore "as lively as this vocabulary
+/// gets", so that is full scale.
+pub async fn measure_motion(path: &Path) -> Result<f64> {
+    let out = Command::new("ffmpeg")
+        .args([
+            "-v", "error", "-i",
+        ])
+        .arg(path)
+        .args([
+            "-vf",
+            "fps=2,scale=64:36",
+            "-an",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
+        ])
+        .output()
+        .await
+        .context("failed to spawn ffmpeg for motion measurement")?;
+    let frame = 64 * 36;
+    let data = out.stdout;
+    if data.len() < frame * 2 {
+        return Ok(0.0);
+    }
+    let frames = data.len() / frame;
+    let mut total = 0.0f64;
+    for i in 1..frames {
+        let (a, b) = (&data[(i - 1) * frame..i * frame], &data[i * frame..(i + 1) * frame]);
+        let diff: u64 = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| x.abs_diff(*y) as u64)
+            .sum();
+        total += diff as f64 / frame as f64;
+    }
+    let mean = total / (frames - 1) as f64;
+    Ok((mean / MOTION_FULL_SCALE).clamp(0.0, 1.0))
+}
+
 /// Probe the duration of a media file via ffprobe.
 pub async fn probe_duration(path: &Path) -> Result<f64> {
     let out = Command::new("ffprobe")
@@ -349,65 +392,27 @@ pub async fn probe_duration(path: &Path) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::motion::{Energy, Move, plan_shot};
 
     #[test]
-    fn zoompan_args_supersample_vignette_grain_and_intermediate_codec() {
-        let args = zoompan_args(0, 61.8, Quality::Balanced);
-        let vf = args.iter().find(|a| a.contains("zoompan")).unwrap();
-        // Balanced supersamples 2x (3840x2160), not the old fixed 5760x3240.
-        assert!(vf.starts_with("scale=3840:2160:flags=lanczos"), "{vf}");
-        assert!(vf.contains("vignette=PI/6"));
-        assert!(vf.contains("eq=contrast=1.03:saturation=1.05"));
-        assert!(vf.contains("noise=alls=5:allf=t+u"));
-        assert!(vf.contains("s=1920x1080"));
-        assert!(vf.contains("fps=30"));
-        // Zoom stays in the 1.0-1.028 range for an inhale.
-        assert!(vf.contains("z='1.0+0.028*(1.0-cos(2*PI*on/900))/2'"));
-        assert!(vf.contains("sin(2*PI*on/1800)"), "pan drift missing: {vf}");
-        // Pan must stay inside the crop; see DRIFT_AMPLITUDE.
-        assert!(DRIFT_AMPLITUDE <= 0.5);
-        // Intermediates are cheap x264, not x265 medium.
+    fn shot_args_wrap_the_motion_chain_with_cheap_intermediates() {
+        let shot = plan_shot(1, Energy::new(0.5), 10);
+        let args = shot_args(&shot, 61.8, Quality::Balanced);
+        let vf = args.iter().find(|a| a.contains("scale=")).unwrap();
+        assert!(vf.starts_with("scale=3840:2160"), "{vf}");
+        assert!(vf.ends_with("format=yuv420p"), "{vf}");
         assert!(args.contains(&"libx264".to_string()));
-        assert!(args.contains(&"veryfast".to_string()));
         assert!(args.contains(&"-an".to_string()));
-        // The still is decoded once at output rate.
         let fr = args.iter().position(|a| a == "-framerate").unwrap();
         assert_eq!(args[fr + 1], "30");
-        // even inhales from min zoom; odd exhales
-        let odd = zoompan_args(1, 61.8, Quality::Balanced);
-        let vf_odd = odd.iter().find(|a| a.contains("zoompan")).unwrap();
-        assert!(vf_odd.contains("z='1.0+0.029*(1.0+cos(2*PI*on/900))/2'"));
+        let t = args.iter().position(|a| a == "-t").unwrap();
+        assert_eq!(args[t + 1], "61.800");
     }
 
     #[test]
-    fn pan_drift_never_exceeds_the_available_crop_margin() {
-        // x = margin/2 + m*margin*sin(t) must stay within [0, margin] for
-        // every scene, otherwise zoompan clamps and the drift stalls at the
-        // extremes of each cycle.
-        for scene in 0..360usize {
-            let rad = ((scene as f64 * 47.0) % 360.0).to_radians();
-            for m in [rad.cos() * DRIFT_AMPLITUDE, rad.sin() * DRIFT_AMPLITUDE] {
-                assert!(
-                    m.abs() <= 0.5 + 1e-9,
-                    "drift {m} clamps the crop in scene {scene}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn zoompan_quality_tiers_trade_scaler_cost_for_fidelity() {
-        let fast = zoompan_args(0, 10.0, Quality::Fast);
-        let vf = fast.iter().find(|a| a.contains("zoompan")).unwrap();
-        assert!(vf.starts_with("scale=1920:1080:flags=bicubic"), "{vf}");
-        assert!(!vf.contains("noise="), "fast tier must skip grain: {vf}");
-        assert!(fast.contains(&"ultrafast".to_string()));
-
-        let high = zoompan_args(0, 10.0, Quality::High);
-        let vf = high.iter().find(|a| a.contains("zoompan")).unwrap();
-        assert!(vf.starts_with("scale=5760:3240:flags=lanczos"), "{vf}");
-        assert!(vf.contains("noise=alls=6:allf=t+u"));
-        assert!(high.contains(&"libx265".to_string()));
+    fn opening_scene_uses_the_calm_default_shot() {
+        let shot = plan_shot(0, Energy::new(0.9), 10);
+        assert_eq!(shot.camera, Move::Breathe);
     }
 
     #[test]
