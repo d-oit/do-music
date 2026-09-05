@@ -1,0 +1,4 @@
+[submodule "vendor/do-harness"]
+	path = vendor/do-harness
+	url = https://github.com/d-o-hub/do-harness.git
+	branch = main

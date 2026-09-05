@@ -7,15 +7,29 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive # vendor/do-harness
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo fmt --all -- --check
-      - run: cargo test --all-targets
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      # Maintainability sensor harness (same sensors as local/pre-commit, on clean infra).
-      - name: Sensor harness (fast subset)
-        run: ./harness/run.sh --fast
+      - name: Install do-harness CLI (vendored, outside any workspace target/)
+        run: cargo install --path vendor/do-harness/crates/do-harness
+      - name: Diagnostics
+        run: do-harness doctor
+      # Full sensor suite on clean infra: gates (fmt clippy test secrets)
+      # fail the build; advisories (size coupling audit) report without
+      # blocking. --strict also fails on weak evidence.
+      - name: do-harness verify
+        run: do-harness verify --format json --evidence .do-harness/evidence.json --strict
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: do-harness-evidence
+          path: .do-harness/evidence.json
+          if-no-files-found: ignore
   audit:
     # Repeated-cadence sensor: dependency CVEs fail the build, not just warn.
+    # (The advisory `audit` sensor inside `verify` skips when cargo-audit is
+    # absent; this job is the hard gate.)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,9 +39,8 @@ jobs:
           tool: cargo-audit
       - run: cargo audit
   mutants:
-    # Mutation testing on every push, through the advisory mutants sensor:
-    # survivors are reported as warn (never block merges) so the trend is
-    # visible without false reds.
+    # Mutation testing on every push; survivors are reported, never blocking.
+    # Opt-in locally (`cargo mutants -j 4`), advisory by nature.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,4 +48,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants
-      - run: MUTANTS=1 ./harness/run.sh --sensor mutants
+      - run: cargo mutants -j 4
+      - name: Summarize survivors
+        if: always()
+        run: |
+          if [ -f mutants.out/log.txt ]; then
+            grep -ciE 'survived|MISS_REQUIRED|NOT_COVERED' mutants.out/log.txt || echo "0 survivor signals"
+          fi

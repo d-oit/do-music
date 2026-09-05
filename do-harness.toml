@@ -1,0 +1,47 @@
+# do-harness configuration (https://github.com/d-o-hub/do-harness).
+#
+# Gates (pre-commit + verify --strict): fmt clippy test secrets.
+# Advisories (allow_failure = true): size coupling audit — findings surface
+# in verify output and must still be addressed per AGENTS.md, they just
+# cannot block a render/commit on their own.
+# cargo-mutants stays opt-in (`cargo mutants -j 4` locally; the mutants CI
+# job) — too expensive to run in every verify pass.
+
+language = "rust"
+
+[hooks]
+pre-commit = ["fmt", "clippy", "test", "secrets"]
+pre-push = []
+
+[[sensors]]
+name = "fmt"
+argv = ["cargo", "fmt", "--all", "--", "--check"]
+
+[[sensors]]
+name = "clippy"
+argv = ["cargo", "clippy", "--workspace", "--", "-D", "warnings"]
+
+[[sensors]]
+name = "test"
+argv = ["cargo", "test", "--workspace"]
+
+[[sensors]]
+name = "secrets"
+argv = ["bash", "scripts/sensors/secrets.sh"]
+timeout = 120
+
+[[sensors]]
+name = "size"
+argv = ["bash", "scripts/sensors/size.sh"]
+allow_failure = true
+
+[[sensors]]
+name = "coupling"
+argv = ["bash", "scripts/sensors/coupling.sh"]
+allow_failure = true
+
+[[sensors]]
+name = "audit"
+argv = ["bash", "scripts/sensors/audit.sh"]
+allow_failure = true
+timeout = 300

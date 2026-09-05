@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# Pre-commit sensor gate: runs the fast subset (fmt clippy tests secrets).
-# Enable once:  git config core.hooksPath .githooks
-set -u
-root="$(git rev-parse --show-toplevel 2>/dev/null)" || {
-    echo "pre-commit: not in a git repository" >&2
-    exit 1
-}
-exec "$root/harness/run.sh" --fast

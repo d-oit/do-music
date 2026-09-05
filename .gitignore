@@ -8,9 +8,8 @@
 *.part
 .DS_Store
 
-# sensor harness local state (history + snapshot baselines)
-/harness/state/*
-!/harness/state/.gitkeep
+# do-harness local state (evidence artifacts)
+/.do-harness/
 
 # skillevaluator reports
 /reports/

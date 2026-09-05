@@ -137,9 +137,18 @@ do-music visual do-music-output/working-calm-10m.mp3 --style flow --palette zen
   for generative content, visually verified artifact-free.
 - **TTS (`minimax-tts-speech-2.8-hd`) is out of scope** (user choice; upstream returned persistent 503 during probing).
 
-## Maintainability harness
+## Dev harness (do-harness)
 
-`harness/run.sh` runs the maintainability sensor suite (fmt, clippy, tests, secrets gated; coupling, size advisory; audit/mutants opt-in) and prints a status table plus self-correction guidance for humans and agents alike. Persist a baseline with `--snapshot`; enable the commit gate with `git config core.hooksPath .githooks`. See `harness/README.md`.
+The maintainability sensor suite runs on [`d-o-hub/do-harness`](https://github.com/d-o-hub/do-harness), vendored as a git submodule at `vendor/do-harness/`. Sensors are configured in `do-harness.toml`: **gates** `fmt`, `clippy`, `test`, `secrets` fail the run; **advisories** `size`, `coupling`, `audit` (`allow_failure = true`) report findings that AGENTS.md still requires fixing. The do-music-specific sensor scripts live in `scripts/sensors/`.
+
+```bash
+cargo install --path vendor/do-harness/crates/do-harness   # once: CLI on PATH
+do-harness hook install                                    # once: commit gate
+do-harness verify                                          # run the suite
+do-harness verify --format json --evidence .do-harness/evidence.json --strict  # CI form
+```
+
+CI (`ci.yml`) runs the full suite via the CLI with submodule checkout, plus hard-gate `audit` (cargo-audit) and advisory `mutants` (cargo-mutants) jobs. Update the vendored harness with `git submodule update --remote vendor/do-harness`.
 
 ## Status
 Implemented: prompt evaluation/planning, GMI request plumbing, dry-run mode,

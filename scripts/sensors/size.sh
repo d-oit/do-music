@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Sensor: size & hygiene (advisory). Targets common AI failure modes:
 # oversized files, too many function params, scattered unwraps/expects.
+# Protocol: exit 0 = pass/warn (advisory), stdout carries the findings.
 set -uo pipefail
-here="$(cd "$(dirname "$0")" && pwd)"
-. "$here/../lib.sh"
-. "$here/../config.sh"
-cd "$here/../.." || exit 1
+cd "$(git rev-parse --show-toplevel 2>/dev/null)" || exit 1
+
+MAX_FILE_LINES=500 # AGENTS.md rule: files below ~500 LOC
+LONG_FN_PARAMS=6   # functions with more params are an AI failure mode
 
 problems=""
 n=0
@@ -34,13 +35,10 @@ done
 unwraps="$(grep -rnE '\.(unwrap|expect)\(' src --include='*.rs' 2>/dev/null | wc -l | tr -d ' ')"
 todos="$(grep -rnE 'TODO|FIXME|HACK' src tests 2>/dev/null | wc -l | tr -d ' ')"
 
-detail="${n} size issue(s):${problems} unwraps(src)=$unwraps todos=$todos"
-
 if [ "$n" -gt 0 ]; then
-    emit size warn $((100 - n * 10)) higher 0 "$detail" \
-        "Split files over ${MAX_FILE_LINES} lines and shrink >$LONG_FN_PARAMS-param signatures. Refactor only where it reduces risk now; convert src unwraps to ? with context."
-else
-    emit size pass 100 higher 0 "$detail" \
-        "Keep functions under ~$LONG_FN_PARAMS params; prefer ? over unwrap in library paths."
+    echo "size: WARN ${n} size issue(s):${problems} unwraps(src)=$unwraps todos=$todos"
+    echo "size: split files over ${MAX_FILE_LINES} lines, shrink >${LONG_FN_PARAMS}-param signatures; prefer ? over unwrap in library paths"
+    exit 0 # advisory: findings surface in verify output without failing the gate
 fi
+echo "size: 0 size issues; unwraps(src)=$unwraps todos=$todos"
 exit 0

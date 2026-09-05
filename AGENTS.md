@@ -28,7 +28,12 @@ Build `do-music` as a small, reliable CLI for GMI Cloud MiniMax Music 3.0.
   band analysis); embedded into the binary via `include_str!`.
 - `tests/visual.rs` — offline visual-engine tests (python-dependent
   checks skip with a printed note when python3/numpy is absent).
-- `harness/` — maintainability sensor harness; see `harness/README.md`.
+- `do-harness.toml` — the dev-harness sensor suite: gates `fmt clippy test
+  secrets`, advisories `size coupling audit` (`allow_failure = true`).
+- `scripts/sensors/` — the do-music-specific sensor scripts those entries run.
+- `vendor/do-harness/` — vendored `d-o-hub/do-harness` CLI (git submodule,
+  tracks latest main). Install with `cargo install --path
+  vendor/do-harness/crates/do-harness`; see its README.
 - `.agents/skills/` — guides for this repo: `prompt-evaluator`, `gmi-music`, `duration-planning`, `local-assembly`, `sensor-harness`.
 
 ## Structure & dependency rules (layers)
@@ -45,12 +50,12 @@ CLI entry / orchestration → pure logic (parsing, planning) → provider adapte
 ## Working style: sensors before vibes
 The harness is part of your definition of done:
 
-1. **Before finishing a task**, run `./harness/run.sh` (`--fast` suffices mid-task) and fix every gated failure: `fmt clippy tests secrets`. Gate-green is not done while warnings remain: the bar is a fully clean sensor report, not just passing gates.
+1. **Before finishing a task**, run `do-harness verify` and fix every gated failure: `fmt clippy test secrets`. Gate-green is not done while warnings remain: the bar is a fully clean sensor report, not just passing gates.
 2. **A failing pre-existing test is a question, not an obstacle**: either you broke behavior (fix the code) or the spec deliberately changed (update the test). Decide explicitly — never weaken or delete tests just to go green.
-3. **Suppressions are visible exceptions**: allow lint findings only via `#[allow(...)] // reason`. Raising a threshold in `harness/config.sh` is the absolute exception — prefer refactoring or suppression with a written reason.
+3. **Suppressions are visible exceptions**: allow lint findings only via `#[allow(...)] // reason`. Raising a threshold in `do-harness.toml` or a sensor script is the absolute exception — prefer refactoring or suppression with a written reason.
 4. **Address every warning, including pre-existing ones**: never wave a warning off because you didn't introduce it. Fix pre-existing warnings you encounter in the same task; keep unrelated pre-existing cleanups in their own commit so your functional change stays reviewable.
-5. **After real fixes land green**, persist the baseline: `./harness/run.sh --snapshot` (comparison shows regressions/improvements next run).
-6. **Advisory results are work items, not decoration**: when `size`/`coupling` report a hub (>8 importers), a >500-line file, a >6-param function, or unhandled unwraps, resolve them — split the module, shrink the signature, convert unwraps to `?` with context — regardless of when they appeared.
+5. **After real fixes land green**, re-run `do-harness verify` end-to-end before committing; CI stores the evidence artifact (`.do-harness/evidence.json`).
+6. **Advisory results are work items, not decoration**: the `size`/`coupling`/`audit` sensors run with `allow_failure = true` (findings cannot block a commit), but when they report a hub (>8 importers), a >500-line file, a >6-param function, unhandled unwraps, or a CVE, resolve it — split the module, shrink the signature, convert unwraps to `?` with context — regardless of when it appeared.
 
 ## Secrets hygiene
 - `.env` stays untracked; only placeholders in `.env.example`.
@@ -58,6 +63,8 @@ The harness is part of your definition of done:
 - If a secret leaks into history, rotate it first; then scrub. Silent deletion is not remediation.
 
 ## Harness housekeeping
-- Enable the commit gate once: `git config core.hooksPath .githooks`
-- New automation should become a sensor (`harness/sensors/`) rather than prose that agents forget to run.
+- Install the CLI once: `cargo install --path vendor/do-harness/crates/do-harness`
+- Enable the commit gate once: `do-harness hook install`
+- Update the vendored harness to latest: `git submodule update --remote vendor/do-harness`
+- New automation should become a sensor (`do-harness.toml` + `scripts/sensors/`) rather than prose that agents forget to run.
 - Skill docs under `.agents/skills/` must stay in sync with behavior; each carries frontmatter validated by NVIDIA SkillEvaluator CI (schema + quality ≥ 70).
