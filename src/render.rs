@@ -365,7 +365,7 @@ pub async fn measure_motion(path: &Path) -> Result<f64> {
         total += diff as f64 / frame as f64;
     }
     let mean = total / (frames - 1) as f64;
-    Ok((mean / MOTION_FULL_SCALE).clamp(0.0, 1.0))
+    Ok((mean / 255.0 / MOTION_FULL_SCALE).clamp(0.0, 1.0))
 }
 
 /// Probe the duration of a media file via ffprobe.
