@@ -262,8 +262,9 @@ pub fn filter_chain(shot: &Shot, quality: Quality, duration_secs: f64) -> String
 /// Transition vocabulary: pick a crossfade that suits the cut.
 ///
 /// A hard musical accent wants a brief light flash (`fadewhite`); a gentle
-/// section change wants a plain dissolve. `strength` is the highlight
-/// strength of the cut in 0..1.
+/// section change wants a plain dissolve. `strength` is the cut mark's
+/// absolute detector score in 0..1 — a genuine peak (onset plus lift)
+/// scores high, so only real accents earn the flash.
 pub fn transition_for(strength: f64, index: usize) -> &'static str {
     if !strength.is_finite() {
         return "fade";

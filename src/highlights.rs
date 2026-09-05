@@ -18,7 +18,9 @@ use crate::video::XFADE_SECONDS;
 pub struct Mark {
     /// Seconds from the start of the track.
     pub time: f64,
-    /// Relative prominence in 0..1 (1 = strongest moment in the track).
+    /// Absolute prominence in 0..1 as scored by the detector: the track's
+    /// loudest mark does not automatically score 1.0, so downstream choices
+    /// (flash vs. dissolve) reflect the event's real magnitude.
     pub strength: f64,
 }
 

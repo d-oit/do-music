@@ -50,6 +50,13 @@ _MIN_SPACING = 3.0
 # Horizon for the energy/brightness lift terms, in seconds.
 _LIFT_SECONDS = 2.0
 
+# Waveform RMS treated as full-scale musical energy for `mean_energy`.
+# Calibrated, not guessed: a full-scale sine has RMS 1/sqrt(2) ~ 0.71, so 3.0
+# puts brick-walled masters (RMS 0.2-0.3) at 0.6-1.0 and quiet ambient beds
+# (RMS 0.05-0.12) at 0.15-0.36 — the same 0..1 range the autotune's measured
+# visual motion lives on, which is what makes the ratio comparison meaningful.
+_RMS_FULL_SCALE = 3.0
+
 
 def _smooth(values: np.ndarray, width: int) -> np.ndarray:
     """Centered moving average; `width` in frames, odd-padded at the edges."""
@@ -128,12 +135,13 @@ def pick_marks(
         if all(abs(int(idx) - t) >= gap for t in taken):
             taken.append(int(idx))
     taken.sort()
-    # `strength` is reported relative to the strongest mark so the planner
-    # can rank candidates; thresholding above already used absolute scores.
-    top = float(score[taken].max()) if taken else 1.0
-    top = top if top > 1e-12 else 1.0
+    # `strength` is the absolute score itself (the score is built on 0..1
+    # terms, so it never exceeds 1). Reporting the raw value — rather than
+    # rescaling by the track maximum — keeps the planner's transition choice
+    # honest: a flash fires on a genuine peak, not on the loudest mark of
+    # every track by construction.
     return [
-        {"time": round(i / hop_rate, 3), "strength": round(float(score[i]) / top, 4)}
+        {"time": round(i / hop_rate, 3), "strength": round(float(score[i]), 4)}
         for i in taken
     ]
 
@@ -178,11 +186,16 @@ def analyze(path: str, buckets: int = 0) -> dict:
     lag = _LIFT_SECONDS / 2.0
     for mark in marks:
         mark["time"] = round(max(0.0, mark["time"] - lag), 3)
+    # `mean_energy` is the track's real waveform RMS on 0..1 (see
+    # _RMS_FULL_SCALE), not a property of the highlight score: the autotune
+    # compares it against measured visual motion, so the scale must track
+    # loudness across tracks rather than event density within one.
+    rms = float(np.sqrt(np.dot(samples, samples) / max(1, len(samples))))
     doc = {
         "duration": round(len(samples) / rate, 3),
         "hop_rate": round(hop_rate, 4),
         "marks": marks,
-        "mean_energy": round(float(np.clip(score.mean() * 4.0, 0.0, 1.0)), 4),
+        "mean_energy": round(float(np.clip(rms * _RMS_FULL_SCALE, 0.0, 1.0)), 4),
     }
     if buckets > 0:
         doc["scene_energy"] = energy_profile(path, buckets)
