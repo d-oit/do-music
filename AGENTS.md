@@ -45,12 +45,12 @@ CLI entry / orchestration → pure logic (parsing, planning) → provider adapte
 ## Working style: sensors before vibes
 The harness is part of your definition of done:
 
-1. **Before finishing a task**, run `./harness/run.sh` (`--fast` suffices mid-task) and fix every gated failure: `fmt clippy tests secrets`.
+1. **Before finishing a task**, run `./harness/run.sh` (`--fast` suffices mid-task) and fix every gated failure: `fmt clippy tests secrets`. Gate-green is not done while warnings remain: the bar is a fully clean sensor report, not just passing gates.
 2. **A failing pre-existing test is a question, not an obstacle**: either you broke behavior (fix the code) or the spec deliberately changed (update the test). Decide explicitly — never weaken or delete tests just to go green.
 3. **Suppressions are visible exceptions**: allow lint findings only via `#[allow(...)] // reason`. Raising a threshold in `harness/config.sh` is the absolute exception — prefer refactoring or suppression with a written reason.
-4. **Don't over-engineer**: fix what sensors flag about *your* change; avoid refactor spirals the task didn't ask for.
+4. **Address every warning, including pre-existing ones**: never wave a warning off because you didn't introduce it. Fix pre-existing warnings you encounter in the same task; keep unrelated pre-existing cleanups in their own commit so your functional change stays reviewable.
 5. **After real fixes land green**, persist the baseline: `./harness/run.sh --snapshot` (comparison shows regressions/improvements next run).
-6. Watch the advisory `size`/`coupling` results when touching shared areas; they report hubs (>8 importers), >500-line files, and >6-param functions.
+6. **Advisory results are work items, not decoration**: when `size`/`coupling` report a hub (>8 importers), a >500-line file, a >6-param function, or unhandled unwraps, resolve them — split the module, shrink the signature, convert unwraps to `?` with context — regardless of when they appeared.
 
 ## Secrets hygiene
 - `.env` stays untracked; only placeholders in `.env.example`.
