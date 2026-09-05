@@ -141,11 +141,7 @@ pub fn strip_code_fence(text: &str) -> &str {
 }
 
 /// Build the user message for the art-direction call.
-pub fn art_user_prompt(
-    music_prompt: &str,
-    scene_count: usize,
-    research: Option<&str>,
-) -> String {
+pub fn art_user_prompt(music_prompt: &str, scene_count: usize, research: Option<&str>) -> String {
     let mut out = format!(
         "Music: {music_prompt}\n\nDesign exactly {scene_count} scenes forming one visual arc."
     );
@@ -161,7 +157,10 @@ pub fn research_query(music_prompt: &str) -> String {
     // Keep it short: search engines do better with a focused phrase than
     // with a whole generation prompt.
     let words: Vec<&str> = music_prompt.split_whitespace().take(12).collect();
-    format!("{} music video visual style palette imagery", words.join(" "))
+    format!(
+        "{} music video visual style palette imagery",
+        words.join(" ")
+    )
 }
 
 #[cfg(test)]

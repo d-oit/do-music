@@ -49,11 +49,7 @@ pub async fn render_shot_segment(
 }
 
 /// FFmpeg args rendering one scene from a planned `Shot`.
-pub fn shot_args(
-    shot: &crate::motion::Shot,
-    duration_secs: f64,
-    quality: Quality,
-) -> Vec<String> {
+pub fn shot_args(shot: &crate::motion::Shot, duration_secs: f64, quality: Quality) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-y".into(),
         "-loop".into(),
@@ -142,7 +138,16 @@ pub async fn xfade_chain(
     codec: &str,
     quality: Quality,
 ) -> Result<()> {
-    xfade_chain_varied(segments, output, &[], transition, segment_secs, codec, quality).await
+    xfade_chain_varied(
+        segments,
+        output,
+        &[],
+        transition,
+        segment_secs,
+        codec,
+        quality,
+    )
+    .await
 }
 
 /// Chain segments using a per-cut transition list.
@@ -331,9 +336,7 @@ pub const MOTION_FULL_SCALE: f64 = 0.5;
 /// gets", so that is full scale.
 pub async fn measure_motion(path: &Path) -> Result<f64> {
     let out = Command::new("ffmpeg")
-        .args([
-            "-v", "error", "-i",
-        ])
+        .args(["-v", "error", "-i"])
         .arg(path)
         .args([
             "-vf",
@@ -356,12 +359,11 @@ pub async fn measure_motion(path: &Path) -> Result<f64> {
     let frames = data.len() / frame;
     let mut total = 0.0f64;
     for i in 1..frames {
-        let (a, b) = (&data[(i - 1) * frame..i * frame], &data[i * frame..(i + 1) * frame]);
-        let diff: u64 = a
-            .iter()
-            .zip(b)
-            .map(|(x, y)| x.abs_diff(*y) as u64)
-            .sum();
+        let (a, b) = (
+            &data[(i - 1) * frame..i * frame],
+            &data[i * frame..(i + 1) * frame],
+        );
+        let diff: u64 = a.iter().zip(b).map(|(x, y)| x.abs_diff(*y) as u64).sum();
         total += diff as f64 / frame as f64;
     }
     let mean = total / (frames - 1) as f64;

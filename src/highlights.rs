@@ -70,7 +70,6 @@ impl Highlights {
             .filter(|v| v.is_finite())
             .unwrap_or(0.0)
     }
-}
 
     /// Parse the python highlight document.
     pub fn parse(text: &str) -> Result<Self> {
@@ -81,8 +80,11 @@ impl Highlights {
         }
         doc.marks
             .retain(|m| m.time.is_finite() && m.time > 0.0 && m.time < doc.duration);
-        doc.marks
-            .sort_by(|a, b| a.time.partial_cmp(&b.time).unwrap_or(std::cmp::Ordering::Equal));
+        doc.marks.sort_by(|a, b| {
+            a.time
+                .partial_cmp(&b.time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         Ok(doc)
     }
 
@@ -108,12 +110,7 @@ impl Highlights {
     }
 
     /// Absolute timeline positions of the `scene_count - 1` scene cuts.
-    pub fn cut_points(
-        &self,
-        scene_count: usize,
-        total_seconds: f64,
-        tolerance: f64,
-    ) -> Vec<f64> {
+    pub fn cut_points(&self, scene_count: usize, total_seconds: f64, tolerance: f64) -> Vec<f64> {
         if scene_count <= 1 {
             return Vec::new();
         }

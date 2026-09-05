@@ -27,6 +27,9 @@ Build `do-music` as a small, reliable CLI for GMI Cloud MiniMax Music 3.0.
   research prompts; pure parsing.
 - `src/autotune.rs` — self-tuning render memory (JSON, capped) turning measured
   output motion vs music energy into the next run's motion bias.
+- `src/providers.rs` — LLM/H3/Pollinations adapters (`art_direct` brief call).
+- `src/research.rs` — optional web visual references (DuckDuckGo HTML +
+  LLM distillation); strictly best-effort.
 - `src/video_inputs.rs` — art direction, highlight analysis and autotune
   write-back for the video pipeline (all best-effort).
 - `src/highlights.rs` — highlight-aware scene timing: parse the python

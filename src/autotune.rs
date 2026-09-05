@@ -32,7 +32,8 @@ pub const MEMORY_FILE: &str = "render-memory.json";
 /// One completed render, as measured from its own output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RenderRecord {
-    /// Free-form tag for the kind of music (from the spec's genre list).
+    /// Free-form tag for the kind of music (`--genre` on the video command;
+    /// renders without it share the `general` bucket).
     #[serde(default)]
     pub genre: String,
     /// Mean musical energy 0..1 over the track.

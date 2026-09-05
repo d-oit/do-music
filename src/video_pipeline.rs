@@ -11,6 +11,7 @@ use do_music::autotune::Memory;
 use do_music::config::Settings;
 use do_music::duration::Duration;
 use do_music::motion::{self, Energy};
+use do_music::providers;
 use do_music::quality::Quality;
 use do_music::render;
 use do_music::video;
@@ -36,7 +37,9 @@ pub struct VideoJob {
     /// Codec for the final chained video (see render::FINAL_CODEC_CHOICES).
     pub video_codec: String,
     /// Render tier trading wall-clock time against fidelity.
-    pub quality: String,
+    pub quality: Quality,
+    /// Genre tag bucketing the self-tuning render memory.
+    pub genre: String,
     /// Snap scene cuts to detected musical highlights.
     pub highlights: bool,
     /// Derive scene imagery from the music via the LLM art director.
@@ -56,15 +59,23 @@ pub struct VideoJob {
 /// and images are reused when already present.
 pub(crate) async fn run_video(job: VideoJob) -> Result<()> {
     let settings = Settings::load()?;
-    let quality = Quality::parse(&job.quality)?;
     let dir = PathBuf::from("do-music-output");
     fs::create_dir_all(&dir).await?;
 
     // Scene prompts, in precedence order: an explicit --scenes file, then
     // LLM art direction derived from the music, then the builtin monk arc.
+    // The brief's scene count must match the plan the pipeline will render,
+    // so it derives from the requested duration rather than a fixed 600 s:
+    // on a 60-minute track a 10-scene arc would just repeat six times.
     let brief = match (&job.scenes, job.art_direct, job.dry_run) {
         (None, true, false) => {
-            art_direct(&settings, &job, video::plan_scene_count(600)).await
+            let requested = Duration::parse(&job.duration)?;
+            art_direct(
+                &settings,
+                &job,
+                video::plan_scene_count(requested.seconds()),
+            )
+            .await
         }
         _ => None,
     };
@@ -126,7 +137,6 @@ pub(crate) async fn run_video(job: VideoJob) -> Result<()> {
         audio_path.as_deref(),
         &scene_list,
         &job,
-        quality,
     )
     .await?;
     println!("Done: {}", final_path.display());
@@ -228,8 +238,8 @@ async fn render_video(
     audio: Option<&Path>,
     scene_list: &video::SceneList,
     job: &VideoJob,
-    quality: Quality,
 ) -> Result<()> {
+    let quality = job.quality;
     // Custom scene list: one segment per listed prompt. Builtin arc: the
     // canonical 10-scene layout scaled to the requested total.
     let scene_count = match &job.scenes {
@@ -280,7 +290,7 @@ async fn render_video(
     } else {
         Memory::default()
     };
-    let genre = job.prompt.split_whitespace().next().unwrap_or("").to_lowercase();
+    let genre = job.genre.to_lowercase();
     let bias = if job.autotune {
         let b = memory.motion_bias(&genre);
         println!("🧠 {}", memory.summary(&genre));
@@ -293,10 +303,7 @@ async fn render_video(
     // vocabulary and scaled by the musical energy underneath it.
     let shots: Vec<motion::Shot> = (0..scene_count)
         .map(|i| {
-            let raw = analysis
-                .as_ref()
-                .map(|h| h.energy_for(i))
-                .unwrap_or(0.35);
+            let raw = analysis.as_ref().map(|h| h.energy_for(i)).unwrap_or(0.35);
             motion::plan_shot(i, Energy::new(raw * bias), scene_count)
         })
         .collect();
@@ -445,7 +452,16 @@ async fn render_video(
     // Close the learning loop: measure what we actually produced and record
     // it, so the next render can correct its motion budget.
     if job.autotune {
-        record_render(dir, memory, &produced, &shots, analysis.as_ref(), &genre, bias).await;
+        record_render(
+            dir,
+            memory,
+            &produced,
+            &shots,
+            analysis.as_ref(),
+            &genre,
+            bias,
+        )
+        .await;
     }
     Ok(())
 }

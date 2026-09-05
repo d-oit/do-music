@@ -360,6 +360,10 @@ print(json.dumps({
     // A steady tone and pure silence have no musical events to cut on:
     // scores are absolute, so featureless audio must not be stretched into
     // spurious highlights.
-    assert_eq!(v["steady_marks"], serde_json::json!(0), "steady tone: {out}");
+    assert_eq!(
+        v["steady_marks"],
+        serde_json::json!(0),
+        "steady tone: {out}"
+    );
     assert_eq!(v["silent_marks"], serde_json::json!(0), "silence: {out}");
 }

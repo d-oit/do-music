@@ -15,6 +15,7 @@ use do_music::highlights::Highlights;
 use do_music::motion;
 use do_music::providers;
 use do_music::render;
+use do_music::research;
 use std::path::Path;
 use tokio::fs;
 
@@ -25,9 +26,13 @@ use crate::video_pipeline::VideoJob;
 /// Best-effort: any failure prints a note and returns `None`, leaving the
 /// caller on the builtin scene arc. A broken art-direction call must not
 /// cost the user a render they could otherwise have had.
-pub(crate) async fn art_direct(settings: &Settings, job: &VideoJob, scene_count: usize) -> Option<Brief> {
+pub(crate) async fn art_direct(
+    settings: &Settings,
+    job: &VideoJob,
+    scene_count: usize,
+) -> Option<Brief> {
     let research = if job.research {
-        match providers::research_visual_style(
+        match research::research_visual_style(
             &settings.api_key,
             &settings.llm_base_url,
             &settings.llm_model,
@@ -36,7 +41,10 @@ pub(crate) async fn art_direct(settings: &Settings, job: &VideoJob, scene_count:
         .await
         {
             Ok(Some(notes)) => {
-                println!("🔎 visual research: {} reference notes", notes.lines().count());
+                println!(
+                    "🔎 visual research: {} reference notes",
+                    notes.lines().count()
+                );
                 Some(notes)
             }
             Ok(None) => {
@@ -82,7 +90,11 @@ pub(crate) async fn art_direct(settings: &Settings, job: &VideoJob, scene_count:
 /// Returns `None` (with a printed note) when python/numpy is unavailable or
 /// the analysis fails: highlight snapping is an enhancement, never a reason
 /// to abort a render that would otherwise succeed.
-pub(crate) async fn detect_highlights(audio: &Path, dir: &Path, buckets: usize) -> Option<Highlights> {
+pub(crate) async fn detect_highlights(
+    audio: &Path,
+    dir: &Path,
+    buckets: usize,
+) -> Option<Highlights> {
     let run = async {
         do_music::visual::check_python()?;
         let package_parent = do_music::visual::ensure_package()?;

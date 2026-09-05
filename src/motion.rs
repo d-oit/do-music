@@ -28,7 +28,7 @@ use crate::video::{OUTPUT_HEIGHT, OUTPUT_WIDTH, VIDEO_FPS};
 pub const MAX_PAN: f64 = 0.45;
 
 /// One camera move in the vocabulary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Move {
     /// Slow breathing zoom, eased with a cosine. The calm default.
     Breathe,
@@ -165,7 +165,10 @@ fn zoom_expr(shot: &Shot, frames_per_cycle: f64) -> String {
         // Smoothstep-ish ease over the whole shot rather than a cycle.
         Move::PushIn => format!("1.0+{a:.4}*(1.0-cos(PI*min(on/{frames_per_cycle:.0},1)))/2"),
         Move::PullOut => {
-            format!("{:.4}-{a:.4}*(1.0-cos(PI*min(on/{frames_per_cycle:.0},1)))/2", 1.0 + a)
+            format!(
+                "{:.4}-{a:.4}*(1.0-cos(PI*min(on/{frames_per_cycle:.0},1)))/2",
+                1.0 + a
+            )
         }
         Move::Drift => format!("1.0+{a:.4}"),
         Move::Orbit => format!("1.0+{a:.4}*(1.0-cos(2*PI*on/{frames_per_cycle:.0}))/2"),
@@ -176,10 +179,7 @@ fn zoom_expr(shot: &Shot, frames_per_cycle: f64) -> String {
 /// Pan expressions `(x, y)` for a shot.
 fn pan_exprs(shot: &Shot, frames_per_cycle: f64) -> (String, String) {
     if shot.pan <= 0.0 {
-        return (
-            "(iw-iw/zoom)/2".to_string(),
-            "(ih-ih/zoom)/2".to_string(),
-        );
+        return ("(iw-iw/zoom)/2".to_string(), "(ih-ih/zoom)/2".to_string());
     }
     let rad = shot.angle.to_radians();
     let (mx, my) = (rad.cos() * shot.pan, rad.sin() * shot.pan);
@@ -218,10 +218,7 @@ fn atmosphere(shot: &Shot, quality: Quality) -> Vec<String> {
         "eq=contrast={contrast:.3}:saturation={saturation:.3}:gamma=1.02"
     ));
     let warmth = shot.energy.scale(-0.03, 0.04);
-    layers.push(format!(
-        "colorbalance=rs={warmth:.3}:bs={:.3}",
-        -warmth
-    ));
+    layers.push(format!("colorbalance=rs={warmth:.3}:bs={:.3}", -warmth));
     if quality.grain() > 0 {
         layers.push(format!("noise=alls={}:allf=t+u", quality.grain()));
     }
@@ -344,10 +341,15 @@ mod tests {
     fn every_move_builds_a_valid_looking_chain() {
         for m in Move::all() {
             let chain = filter_chain(&shot(m), Quality::Balanced, 60.0);
-            assert!(chain.starts_with("scale=3840:2160:flags=lanczos"), "{chain}");
+            assert!(
+                chain.starts_with("scale=3840:2160:flags=lanczos"),
+                "{chain}"
+            );
             assert!(chain.ends_with("format=yuv420p"), "{chain}");
             assert!(chain.contains("vignette=PI/6"));
-            assert!(chain.contains(&format!("s={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")) || m == Move::Hold);
+            assert!(
+                chain.contains(&format!("s={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}")) || m == Move::Hold
+            );
             // No empty filter slots, which ffmpeg rejects outright.
             assert!(!chain.contains(",,"), "empty filter in {chain}");
             assert!(!chain.contains("NaN"), "NaN leaked into {chain}");
@@ -389,7 +391,10 @@ mod tests {
         let calm = plan_shot(1, Energy::new(0.0), 10);
         let lively = plan_shot(1, Energy::new(1.0), 10);
         assert!(lively.period < calm.period, "livelier scenes move faster");
-        assert!(lively.amplitude > calm.amplitude, "livelier scenes travel more");
+        assert!(
+            lively.amplitude > calm.amplitude,
+            "livelier scenes travel more"
+        );
     }
 
     #[test]

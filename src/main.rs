@@ -98,6 +98,9 @@ enum CommandKind {
         /// Render tier: fast (preview), balanced (default), high (archive).
         #[arg(long, default_value = "balanced")]
         quality: String,
+        /// Genre tag for the self-tuning render memory.
+        #[arg(long)]
+        genre: Option<String>,
         /// Cut scenes on even timings instead of snapping to musical highlights.
         #[arg(long)]
         no_highlights: bool,
@@ -230,6 +233,7 @@ async fn main() -> Result<()> {
             jobs,
             video_codec,
             quality,
+            genre,
             no_highlights,
             no_art_direction,
             research,
@@ -260,7 +264,8 @@ async fn main() -> Result<()> {
                 xfade,
                 jobs,
                 video_codec,
-                quality,
+                quality: do_music::quality::Quality::parse(&quality)?,
+                genre: genre.unwrap_or_else(|| "general".into()),
                 highlights: !no_highlights,
                 art_direct: !no_art_direction,
                 research,

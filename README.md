@@ -47,7 +47,7 @@ do-music optimize <prompt>
 do-music setup [--api-key ...] [--llm-model ...] [--music-model ...] [--video-model ...]
 do-music providers
 do-music template list|show <name>|new <name>
-do-music video <prompt> [--duration 10m] [--scenes <list.json>] [--audio <track>] [--xfade <name>] [--quality fast|balanced|high] [--jobs N] [--research] [--no-highlights] [--no-art-direction] [--no-autotune] [--no-i2v]
+do-music video <prompt> [--duration 10m] [--scenes <list.json>] [--audio <track>] [--xfade <name>] [--quality fast|balanced|high] [--jobs N] [--genre <name>] [--research] [--no-highlights] [--no-art-direction] [--no-autotune] [--no-i2v]
 do-music visual <audio> [--style flow|bloom|plasma|waves|rings] [--palette zen|ink|abyss|ember|aurora] [--codec h264|hevc] [--mirror] [--seed 42]
 ```
 
@@ -112,8 +112,9 @@ moves and compares it against the music's own energy, appending a record to
 Renders that came out consistently flatter than their music raise the next
 run's motion bias; busier ones lower it. The bias is damped and clamped to
 0.6–1.5 so it converges instead of oscillating, and history is matched by
-genre once there is enough of it. A missing or corrupt memory file is
-treated as empty.
+genre once there is enough of it — tag renders of the same kind of music
+with `--genre <name>` (renders without it share the `general` bucket). A
+missing or corrupt memory file is treated as empty.
 
 ### Highlight-aware scene cuts
 
