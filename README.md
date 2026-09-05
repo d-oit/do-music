@@ -47,7 +47,7 @@ do-music optimize <prompt>
 do-music setup [--api-key ...] [--llm-model ...] [--music-model ...] [--video-model ...]
 do-music providers
 do-music template list|show <name>|new <name>
-do-music video <prompt> [--duration 10m] [--scenes <list.json>] [--audio <track>] [--xfade <name>] [--no-i2v]
+do-music video <prompt> [--duration 10m] [--scenes <list.json>] [--audio <track>] [--xfade <name>] [--quality fast|balanced|high] [--jobs N] [--genre <name>] [--research] [--no-highlights] [--no-art-direction] [--no-autotune] [--no-i2v]
 do-music visual <audio> [--style flow|bloom|plasma|waves|rings] [--palette zen|ink|abyss|ember|aurora] [--codec h264|hevc] [--mirror] [--seed 42]
 ```
 
@@ -79,6 +79,86 @@ boundaries stay aligned to the music; a one-scene list is supported too. Use
 `--codec hevc` only when smaller local files matter more than universal
 playback. These choices follow YouTube's current upload guidance (H.264,
 AAC-LC/48 kHz, 4:2:0, and MP4 fast-start).
+
+### Music-driven art direction
+
+By default the video is designed from the music rather than from a fixed
+story. The LLM acts as art director and returns a visual brief — palette,
+rendering style, negative prompt and one image prompt per scene forming a
+beginning/development/resolution arc — which feeds the Pollinations stills
+and the colour grade.
+
+`--research` additionally searches the web for visual references for the
+musical style and distils them into the brief. Both steps are best-effort:
+a failure prints a note and falls back to the builtin monk arc, so a render
+never dies because art direction was unavailable. `--no-art-direction`
+restores the old fixed arc.
+
+### Cinematic motion
+
+Scenes no longer share one breathing zoom. Each gets a shot from a
+vocabulary — `breathe`, `push-in`, `pull-out`, `drift`, `orbit`, `hold` —
+picked by a deterministic rotation that opens and closes on the calmest
+move. Pace and travel scale with the musical energy measured *under that
+scene*, and each shot carries an atmosphere pass (vignette, S-curve grade,
+energy-keyed warmth, optional grain). Transitions vary too: a peak musical
+accent gets a light flash, a moderate one a soft wipe, the rest a dissolve.
+
+### Self-tuning renders (`--no-autotune` to disable)
+
+After each render do-music measures how much the finished picture actually
+moves and compares it against the music's own energy, appending a record to
+`do-music-output/render-memory.json` (capped at 50 entries, no database).
+Renders that came out consistently flatter than their music raise the next
+run's motion bias; busier ones lower it. The bias is damped and clamped to
+0.6–1.5 so it converges instead of oscillating, and history is matched by
+genre once there is enough of it — tag renders of the same kind of music
+with `--genre <name>` (renders without it share the `general` bucket). A
+missing or corrupt memory file is treated as empty.
+
+### Highlight-aware scene cuts
+
+Scene transitions snap to musical events instead of a metronome. The
+embedded analyzer (`visualizer/highlights.py`, numpy-only) scores every
+frame from three deterministic features:
+
+- **onset strength** (spectral flux) — percussive entries;
+- **energy lift** over a 2 s horizon — swells and section changes, the
+  useful signal in ambient material with no transients;
+- **brightness lift** (spectral centroid) — pads opening up, strings
+  entering, changes that carry no extra energy.
+
+Each ideal scene boundary then snaps to the strongest mark within
+`--highlight-window` seconds (default 8), subject to every segment staying
+long enough to crossfade. Boundaries with no nearby mark keep their even
+position, and the durations always sum back to the exact track length, so
+the video still lands on the music.
+
+Scores are absolute rather than max-normalized: a featureless track yields
+*no* marks rather than having its noise stretched into invented highlights.
+Analysis is best-effort — if python3/numpy is missing or the analysis
+fails, the render prints a note and falls back to even pacing.
+
+```bash
+do-music video --audio track.mp3 --scenes scenes.json      # snapping on (default)
+do-music video --audio track.mp3 --no-highlights           # even pacing
+do-music video --audio track.mp3 --highlight-window 15     # allow bigger moves
+```
+
+### Render tiers (`--quality`)
+
+The video path spends nearly all of its wall time in the per-scene animation
+render, so one knob controls the cost/fidelity trade:
+
+| tier | supersample | grain | intermediates | final preset | use |
+|---|---|---|---|---|---|
+| `fast` | 1× (1920×1080) | off | x264 `ultrafast` | `veryfast` | previews, iterating on scene lists |
+| `balanced` *(default)* | 2× (3840×2160) | 5 | x264 `veryfast` | `medium` | normal renders |
+| `high` | 3× (5760×3240) | 6 | x265 `medium` | `slow` | archive / final upload |
+
+`--jobs 0` (the default) renders one fallback segment per CPU core, capped at
+8 so a long scene list does not thrash memory with many 4K scaler buffers.
+
 
 Verified live 2026-08-29: 76.2 s track, 76.0 s 1920x1080 video, six scenes
 (drop-ripple → koi rises → village flyover → bloom → drift → closing ripple
@@ -130,7 +210,7 @@ do-music visual do-music-output/working-calm-10m.mp3 --style flow --palette zen
 - **MiniMax-H3 video returns HTTP 402** ("Insufficient credits") on keys without video credits. `do-music video` tries H3 per scene, prints one warning on the first failure, then renders the remaining scenes with the supersampled ffmpeg fallback — the video never aborts. H3 starts working the moment credits exist.
 - **LLM `MiniMaxAI/MiniMax-M2.7` is intermittently unavailable upstream** (HTTP 429/520/521 observed 2026-08-29). `MiniMaxAI/MiniMax-M3` answered `200 ok` throughout; select it with `GMI_LLM_MODEL=MiniMaxAI/MiniMax-M3` (or `do-music setup --llm-model`). `do-music providers` shows the live status.
 - **MiniMax Week free access ends 2026-09-06.** After that date music generation starts returning 402; the CLI fails loudly with the provider error by design (no silent fallback to a paid model).
-- **Pollinations free tier caps scene stills at 1024×576.** URLs are deterministic (seeded) and double as H3 `first_frame_image`; final quality comes from the 5760×3240 supersample + grain at render, not the source resolution.
+- **Pollinations free tier caps scene stills at 1024×576.** URLs are deterministic (seeded) and double as H3 `first_frame_image`; final quality comes from the supersample + grain at render (3840×2160 on the default `balanced` tier, 5760×3240 on `high`), not the source resolution.
 - **Generative-visual bitrate varies by style** (HEVC CRF 19): the flow style
   lands around 2 Mbps for ambient tracks (particle trails are high-entropy),
   while low-motion styles compress far below the 1.5 Mbps target — expected

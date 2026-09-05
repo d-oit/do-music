@@ -20,6 +20,25 @@ Build `do-music` as a small, reliable CLI for GMI Cloud MiniMax Music 3.0.
 - `src/plan.rs` — track planning, `MusicSpec`, section prompts.
 - `src/assembly.rs` — copy/FFmpeg planning + execution.
 - `src/api.rs` — request/response serialization + defensive parsing.
+- `src/motion.rs` — cinematic shot vocabulary (breathe/push-in/pull-out/drift/
+  orbit/hold), energy-scaled pacing, atmosphere grade, transition choice. Pure
+  filter-graph builders.
+- `src/artdirection.rs` — LLM visual brief (palette/style/scene arc) + web
+  research prompts; pure parsing.
+- `src/autotune.rs` — self-tuning render memory (JSON, capped) turning measured
+  output motion vs music energy into the next run's motion bias.
+- `src/providers.rs` — LLM/music/Pollinations adapters (`art_direct` brief call).
+- `src/h3.rs` — Hailuo H3 requestqueue adapter (submit, poll, download).
+- `src/research.rs` — optional web visual references (DuckDuckGo HTML +
+  LLM distillation); strictly best-effort.
+- `src/video_inputs.rs` — art direction, highlight analysis and autotune
+  write-back for the video pipeline (all best-effort).
+- `src/highlights.rs` — highlight-aware scene timing: parse the python
+  highlight document, snap scene cuts to musical marks, variable xfade offsets.
+- `visualizer/highlights.py` — numpy-only highlight detection (onset +
+  energy/brightness lift), emits JSON marks for the planner.
+- `src/quality.rs` — render tiers (`fast`/`balanced`/`high`): supersample factor,
+  scaler, grain, intermediate codec/preset, final preset. Pure data.
 - `src/main.rs` — CLI and orchestration only, plus the network transport (LLM evaluation and GMI music calls).
 - `tests/planning.rs` — deterministic tests; must not call live APIs.
 - `src/visual.rs` — `visual` command plumbing: embedded Python package

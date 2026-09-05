@@ -2,77 +2,43 @@
 //! xfade chain, mux, and probes.
 //!
 //! Pure arg builders are offline-testable here; spawning happens through
-//! `run_ffmpeg`. Intermediate segments may use HEVC, but the final chain and
-//! mux are YouTube-safe H.264/AAC: MP4 fast-start, BT.709, progressive 30 fps,
-//! and stereo 48 kHz audio. ffmpeg must be on PATH.
+//! `run_ffmpeg`. Cost-sensitive choices (supersample factor, scaler, grain,
+//! intermediate codec/preset) come from `Quality` so a preview render and an
+//! archive render share one code path. Intermediates are throwaway and encode
+//! fast; the final chain and mux stay YouTube-safe H.264/AAC: MP4 fast-start,
+//! BT.709, progressive 30 fps, stereo 48 kHz. ffmpeg must be on PATH.
 use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 use crate::encode::{final_encode_args, youtube_video_encode_args};
+use crate::quality::Quality;
 use crate::video::{OUTPUT_HEIGHT, OUTPUT_WIDTH, VIDEO_FPS, XFADE_SECONDS};
 
-/// FFmpeg args that render one fallback (Zoompan) segment.
+/// Render one fallback segment with a default calm shot.
 ///
-/// Supersample to 5760x3240 first (kills the pixel-snap jitter of the old
-/// 2304-wide chain), then a 30 s breathing cycle zooming 1.0-1.06 with
-/// cosine easing, centered, 30 fps; finish with vignette, grade, film
-/// grain; HEVC CRF 18, yuv420p.
-///
-/// v2 (2026-08-31): add subtle pan drift so highlights don't feel
-/// tripod-locked. Each scene gets a deterministic drift angle and amplitude
-/// over the available zoom crop (60 s period), so the source is never read
-/// outside its bounds. Meditation stillness is preserved: zoom stays
-/// 1.00–1.032 and pan remains subtle; the eye tracks motion without feeling
-/// `Ken Burns`.
-pub fn zoompan_args(scene_index: usize, duration_secs: f64) -> Vec<String> {
-    // Alternating inhale/exhale per scene; slight per-scene period/amplitude
-    // jitter avoids the "metronome" feel when chaining 10×61.8s segments.
-    let inhale = scene_index.is_multiple_of(2);
-    // Deterministic drift: scene_index hashes to an angle, keeping renders reproducible.
-    // The multiplier is applied to the available crop margin below, so panning
-    // never asks zoompan to read outside the source frame.
-    let drift_deg = (scene_index as f64 * 47.0) % 360.0;
-    let drift_rad = drift_deg.to_radians();
-    let drift_x = drift_rad.cos() * 0.65;
-    let drift_y = drift_rad.sin() * 0.65;
-    // Per-scene breathing amplitude 0.028–0.032 (instead of fixed 0.03).
-    let amp = 0.028 + (scene_index as f64 % 5.0) * 0.001;
-    let breathing = if inhale {
-        format!("1.0+{amp:.3}*(1.0-cos(2*PI*on/900))/2")
-    } else {
-        format!("1.0+{amp:.3}*(1.0+cos(2*PI*on/900))/2")
-    };
-    vec![
-        "-y".into(),
-        "-loop".into(),
-        "1".into(),
-        "-i".into(),
-        "{input}".into(),
-        "-t".into(),
-        format!("{duration_secs:.3}"),
-        "-vf".into(),
-        format!(
-            "scale=5760:3240:flags=lanczos,zoompan=z='{breathing}':x='(iw-iw/zoom)/2+{drift_x:.4}*(iw-iw/zoom)*sin(2*PI*on/1800)':y='(ih-ih/zoom)/2+{drift_y:.4}*(ih-ih/zoom)*cos(2*PI*on/1800)':d=1:s={OUTPUT_WIDTH}x{OUTPUT_HEIGHT}:fps={VIDEO_FPS},vignette=PI/6,eq=contrast=1.03:saturation=1.05,noise=alls=6:allf=t+u,format=yuv420p"
-        ),
-        "-c:v".into(),
-        "libx265".into(),
-        "-preset".into(),
-        "medium".into(),
-        "-crf".into(),
-        "18".into(),
-        "{output}".into(),
-    ]
-}
-
-/// Render one fallback segment with FFmpeg (breathing zoompan).
+/// Kept for callers without a music-driven plan; the video pipeline uses
+/// `render_shot_segment` with a `Shot` chosen per scene.
 pub async fn render_zoompan_segment(
     image: &Path,
     output: &Path,
     scene_index: usize,
     duration_secs: f64,
+    quality: Quality,
 ) -> Result<()> {
-    let args: Vec<String> = zoompan_args(scene_index, duration_secs)
+    let shot = crate::motion::plan_shot(scene_index, crate::motion::Energy::new(0.35), 0);
+    render_shot_segment(image, output, &shot, duration_secs, quality).await
+}
+
+/// Render one scene with a planned cinematic shot (camera move + atmosphere).
+pub async fn render_shot_segment(
+    image: &Path,
+    output: &Path,
+    shot: &crate::motion::Shot,
+    duration_secs: f64,
+    quality: Quality,
+) -> Result<()> {
+    let args: Vec<String> = shot_args(shot, duration_secs, quality)
         .into_iter()
         .map(|a| {
             a.replace("{input}", &image.display().to_string())
@@ -82,20 +48,51 @@ pub async fn render_zoompan_segment(
     run_ffmpeg(&args).await
 }
 
-/// Extend a short H3 clip (5 s) to `target_secs` by looping with blend-mode
-/// motion interpolation.
+/// FFmpeg args rendering one scene from a planned `Shot`.
+pub fn shot_args(shot: &crate::motion::Shot, duration_secs: f64, quality: Quality) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "-y".into(),
+        "-loop".into(),
+        "1".into(),
+        "-framerate".into(),
+        VIDEO_FPS.to_string(),
+        "-i".into(),
+        "{input}".into(),
+        "-t".into(),
+        format!("{duration_secs:.3}"),
+        "-vf".into(),
+        crate::motion::filter_chain(shot, quality, duration_secs),
+        "-an".into(),
+    ];
+    args.extend(quality.intermediate_encode_args());
+    args.push("{output}".into());
+    args
+}
+
+/// Extend a short H3 clip (5 s) to `target_secs` by looping it.
 ///
-/// `mi_mode=blend` is deliberate: `mci` costs ~10 min per 61.8 s clip while
-/// blend smooths the loop boundary cheaply. `-an` drops the H3-delivered
-/// synchronized audio; the mux adds the music track.
+/// Perf note (v3): the old chain ran `minterpolate=fps=30` *after* an
+/// explicit `fps=30`, i.e. motion interpolation with nothing to interpolate
+/// — pure cost (often minutes per segment) for zero visual change. The loop
+/// seam is instead softened by a short crossfade-free `tmix` on the
+/// `high` tier only; cheaper tiers just cut, which is imperceptible on
+/// meditative footage.
+///
+/// `-an` drops the H3-delivered synchronized audio; the mux adds the music.
 pub fn loop_extend_args(
     input: &Path,
     output: &Path,
     target_secs: f64,
     source_secs: f64,
+    quality: Quality,
 ) -> Vec<String> {
     let loops = (target_secs / source_secs).ceil() as u32 - 1;
-    vec![
+    let smooth = match quality {
+        Quality::High => ",tmix=frames=2:weights=1 1",
+        _ => "",
+    };
+    let flags = quality.scale_flags();
+    let mut args: Vec<String> = vec![
         "-y".into(),
         "-stream_loop".into(),
         loops.to_string(),
@@ -104,30 +101,23 @@ pub fn loop_extend_args(
         "-t".into(),
         format!("{target_secs:.3}"),
         "-vf".into(),
-        format!(
-            "scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:flags=lanczos,fps={VIDEO_FPS},minterpolate=fps={VIDEO_FPS}:mi_mode=blend"
-        ),
+        format!("scale={OUTPUT_WIDTH}:{OUTPUT_HEIGHT}:flags={flags},fps={VIDEO_FPS}{smooth}"),
         "-an".into(),
-        "-c:v".into(),
-        "libx265".into(),
-        "-preset".into(),
-        "medium".into(),
-        "-crf".into(),
-        "18".into(),
-        "-pix_fmt".into(),
-        "yuv420p".into(),
-        output.display().to_string(),
-    ]
+    ];
+    args.extend(quality.intermediate_encode_args());
+    args.push(output.display().to_string());
+    args
 }
 
-/// Extend a short H3 clip to its target length (loop + blend interpolation).
+/// Extend a short H3 clip to its target length (loop + normalize).
 pub async fn loop_extend_clip(
     input: &Path,
     output: &Path,
     target_secs: f64,
     source_secs: f64,
+    quality: Quality,
 ) -> Result<()> {
-    let args = loop_extend_args(input, output, target_secs, source_secs);
+    let args = loop_extend_args(input, output, target_secs, source_secs, quality);
     run_ffmpeg(&args).await
 }
 
@@ -137,19 +127,48 @@ pub async fn loop_extend_clip(
 /// scan, two B frames, a closed GOP, BT.709 and MP4 fast-start.
 ///
 /// `transition` is any ffmpeg xfade name (`fade`, `fadewhite` = light-flash
-/// cut, `wipeleft`, `circleopen`, ...). Offsets use each segment's real
-/// duration (`segment_secs`), so custom scene counts stay frame-accurate.
+/// cut, `wipeleft`, `circleopen`, ...). `segment_secs` carries each segment's
+/// real duration, so both the uniform layout and highlight-snapped scenes of
+/// differing lengths stay frame-accurate.
 pub async fn xfade_chain(
     segments: &[PathBuf],
     output: &Path,
     transition: &str,
-    segment_secs: f64,
+    segment_secs: &[f64],
     codec: &str,
+    quality: Quality,
+) -> Result<()> {
+    xfade_chain_varied(
+        segments,
+        output,
+        &[],
+        transition,
+        segment_secs,
+        codec,
+        quality,
+    )
+    .await
+}
+
+/// Chain segments using a per-cut transition list.
+///
+/// `transitions[i]` names the transition into segment `i + 1`; when the list
+/// is shorter than the cut count the `fallback` name is used, so a caller
+/// with no per-cut plan keeps the old single-transition behaviour.
+#[allow(clippy::too_many_arguments)] // one ffmpeg invocation's worth of knobs
+pub async fn xfade_chain_varied(
+    segments: &[PathBuf],
+    output: &Path,
+    transitions: &[String],
+    fallback: &str,
+    segment_secs: &[f64],
+    codec: &str,
+    quality: Quality,
 ) -> Result<()> {
     if segments.is_empty() {
         return Err(anyhow!("video chain needs at least one segment"));
     }
-    let encode_args = final_encode_args(codec)?;
+    let encode_args = final_encode_args(codec, quality)?;
     let mut args: Vec<String> = vec!["-y".into()];
     for s in segments {
         args.push("-i".into());
@@ -163,16 +182,21 @@ pub async fn xfade_chain(
         return run_ffmpeg(&args).await;
     }
 
-    let n = segments.len();
-    let offsets: Vec<f64> = (1..n)
-        .map(|k| k as f64 * (segment_secs - XFADE_SECONDS))
-        .collect();
+    if segment_secs.len() != segments.len() {
+        return Err(anyhow!(
+            "xfade chain got {} segments but {} durations",
+            segments.len(),
+            segment_secs.len()
+        ));
+    }
+    let offsets = crate::highlights::variable_xfade_offsets(segment_secs);
     let mut parts = Vec::new();
     let mut prev = "[0:v]".to_string();
     for (i, offset) in offsets.iter().enumerate() {
         let out = format!("[v{}]", i + 1);
+        let name = transitions.get(i).map(String::as_str).unwrap_or(fallback);
         parts.push(format!(
-            "{prev}[{}:v]xfade=transition={transition}:duration={XFADE_SECONDS}:offset={offset:.3}{out}",
+            "{prev}[{}:v]xfade=transition={name}:duration={XFADE_SECONDS}:offset={offset:.3}{out}",
             i + 1
         ));
         prev = out;
@@ -232,16 +256,16 @@ pub fn mux_args(video: &Path, audio: &Path, output: &Path, total_secs: f64) -> V
 ///
 /// Audio is passed through when already AAC (as produced by
 /// `mux_video_audio`).
-pub fn youtube_h264_args(input: &Path, output: &Path) -> Vec<String> {
+pub fn youtube_h264_args(input: &Path, output: &Path, quality: Quality) -> Vec<String> {
     let mut args = vec!["-y".into(), "-i".into(), input.display().to_string()];
-    args.extend(youtube_video_encode_args());
+    args.extend(youtube_video_encode_args(quality));
     args.extend(["-c:a".into(), "copy".into(), output.display().to_string()]);
     args
 }
 
 /// Re-encode a HEVC video to YouTube-safe H.264.
-pub async fn transcode_to_h264(input: &Path, output: &Path) -> Result<()> {
-    run_ffmpeg(&youtube_h264_args(input, output)).await
+pub async fn transcode_to_h264(input: &Path, output: &Path, quality: Quality) -> Result<()> {
+    run_ffmpeg(&youtube_h264_args(input, output, quality)).await
 }
 
 /// Execute the mux plan.
@@ -293,6 +317,59 @@ pub async fn materialize_pcm_wav(input: &Path, output: &Path) -> Result<()> {
     run_ffmpeg(&args).await
 }
 
+/// Raw inter-frame luma delta treated as maximum visual motion.
+///
+/// See `measure_motion` for how this was calibrated.
+pub const MOTION_FULL_SCALE: f64 = 0.5;
+
+/// Mean absolute frame-to-frame luma change of a video, normalized to 0..1.
+///
+/// This is the autotune feedback signal: how much the finished picture
+/// actually moves. Sampled at 2 fps on a tiny 64x36 grayscale decode, so a
+/// ten-minute video costs well under a second to measure.
+///
+/// `MOTION_FULL_SCALE` maps this raw signal onto 0..1. It is calibrated,
+/// not guessed: rendering the whole move vocabulary at 2 fps/64x36 gives a
+/// mean inter-frame luma delta of ~0.011 for a static `hold`, ~0.16-0.35
+/// for `breathe`, and ~0.32-0.50 for an energetic `push-in`. Half a grey
+/// level per pixel per sample is therefore "as lively as this vocabulary
+/// gets", so that is full scale.
+pub async fn measure_motion(path: &Path) -> Result<f64> {
+    let out = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args([
+            "-vf",
+            "fps=2,scale=64:36",
+            "-an",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "-",
+        ])
+        .output()
+        .await
+        .context("failed to spawn ffmpeg for motion measurement")?;
+    let frame = 64 * 36;
+    let data = out.stdout;
+    if data.len() < frame * 2 {
+        return Ok(0.0);
+    }
+    let frames = data.len() / frame;
+    let mut total = 0.0f64;
+    for i in 1..frames {
+        let (a, b) = (
+            &data[(i - 1) * frame..i * frame],
+            &data[i * frame..(i + 1) * frame],
+        );
+        let diff: u64 = a.iter().zip(b).map(|(x, y)| x.abs_diff(*y) as u64).sum();
+        total += diff as f64 / frame as f64;
+    }
+    let mean = total / (frames - 1) as f64;
+    Ok((mean / 255.0 / MOTION_FULL_SCALE).clamp(0.0, 1.0))
+}
+
 /// Probe the duration of a media file via ffprobe.
 pub async fn probe_duration(path: &Path) -> Result<f64> {
     let out = Command::new("ffprobe")
@@ -317,44 +394,68 @@ pub async fn probe_duration(path: &Path) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::motion::{Energy, Move, plan_shot};
 
     #[test]
-    fn zoompan_args_supersample_vignette_grain_and_x265() {
-        let args = zoompan_args(0, 61.8);
-        let vf = args.iter().find(|a| a.contains("zoompan")).unwrap();
-        assert!(vf.starts_with("scale=5760:3240:flags=lanczos"));
-        assert!(vf.contains("vignette=PI/6"));
-        assert!(vf.contains("eq=contrast=1.03:saturation=1.05"));
-        assert!(vf.contains("noise=alls=6:allf=t+u"));
-        assert!(vf.contains("s=1920x1080"));
-        assert!(vf.contains("fps=30"));
-        // v3: valid zoom stays in the 1.0–1.028 range for an inhale.
-        assert!(vf.contains("z='1.0+0.028*(1.0-cos(2*PI*on/900))/2'"));
-        assert!(vf.contains("cos(2*PI*on/900)"));
-        assert!(vf.contains("sin(2*PI*on/1800)"), "pan drift missing: {vf}");
-        assert!(args.contains(&"libx265".to_string()));
-        let crf = args.iter().position(|a| a == "-crf").unwrap();
-        assert_eq!(args[crf + 1], "18");
-        // even inhales from min zoom; odd exhales
-        let odd = zoompan_args(1, 61.8);
-        let vf_odd = odd.iter().find(|a| a.contains("zoompan")).unwrap();
-        assert!(vf_odd.contains("z='1.0+0.029*(1.0+cos(2*PI*on/900))/2'"));
+    fn shot_args_wrap_the_motion_chain_with_cheap_intermediates() {
+        let shot = plan_shot(1, Energy::new(0.5), 10);
+        let args = shot_args(&shot, 61.8, Quality::Balanced);
+        let vf = args.iter().find(|a| a.contains("scale=")).unwrap();
+        assert!(vf.starts_with("scale=3840:2160"), "{vf}");
+        assert!(vf.ends_with("format=yuv420p"), "{vf}");
+        assert!(args.contains(&"libx264".to_string()));
+        assert!(args.contains(&"-an".to_string()));
+        let fr = args.iter().position(|a| a == "-framerate").unwrap();
+        assert_eq!(args[fr + 1], "30");
+        let t = args.iter().position(|a| a == "-t").unwrap();
+        assert_eq!(args[t + 1], "61.800");
     }
+
     #[test]
-    fn loop_extend_args_drop_audio_use_blend_and_x265() {
-        let args = loop_extend_args(Path::new("in.mp4"), Path::new("out.mp4"), 61.8, 5.0);
+    fn opening_scene_uses_the_calm_default_shot() {
+        let shot = plan_shot(0, Energy::new(0.9), 10);
+        assert_eq!(shot.camera, Move::Breathe);
+    }
+
+    #[test]
+    fn loop_extend_args_drop_audio_and_skip_pointless_minterpolate() {
+        let args = loop_extend_args(
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            61.8,
+            5.0,
+            Quality::Balanced,
+        );
         assert!(args.contains(&"-an".to_string()));
         let li = args.iter().position(|a| a == "-stream_loop").unwrap();
         assert_eq!(args[li + 1], "12"); // ceil(61.8/5)-1
-        let vf = args.iter().find(|a| a.contains("minterpolate")).unwrap();
-        assert!(vf.contains("mi_mode=blend"));
+        let vf = args.iter().find(|a| a.contains("fps=")).unwrap();
+        // minterpolate at the same fps as its input was a no-op costing minutes.
+        assert!(!vf.contains("minterpolate"), "{vf}");
         assert!(vf.contains("fps=30"));
-        assert!(args.contains(&"libx265".to_string()));
+        assert!(args.contains(&"libx264".to_string()));
+
+        // Only the archive tier pays for seam smoothing.
+        let high = loop_extend_args(
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            61.8,
+            5.0,
+            Quality::High,
+        );
+        let vf = high.iter().find(|a| a.contains("fps=")).unwrap();
+        assert!(vf.contains("tmix=frames=2"), "{vf}");
     }
 
     #[test]
     fn loop_extend_loops_ten_times_for_six_second_clips() {
-        let args = loop_extend_args(Path::new("in.mp4"), Path::new("out.mp4"), 60.0, 6.0);
+        let args = loop_extend_args(
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            60.0,
+            6.0,
+            Quality::Balanced,
+        );
         let li = args.iter().position(|a| a == "-stream_loop").unwrap();
         assert_eq!(args[li + 1], "9");
         let ti = args.iter().position(|a| a == "-t").unwrap();
@@ -374,21 +475,20 @@ mod tests {
         assert!(args.contains(&"48000".to_string()));
         assert!(args.contains(&"+faststart".to_string()));
         assert!(!args.contains(&"hvc1".to_string()));
+        // The mux must never re-encode the finished chain.
+        assert!(args.contains(&"copy".to_string()));
         assert_eq!(args.iter().filter(|a| a.as_str() == "-map").count(), 2);
         let ti = args.iter().position(|a| a == "-t").unwrap();
         assert_eq!(args[ti + 1], "600.000");
     }
 
     #[test]
-    fn xfade_chain_encodes_one_crf_step_higher_than_segments() {
-        // Zoompan segments are CRF 18; the xfade chain output must be CRF 20.
-        let seg = zoompan_args(0, 61.8);
-        let seg_crf = seg.iter().position(|a| a == "-crf").unwrap();
-        assert_eq!(seg[seg_crf + 1], "18");
-    }
-    #[test]
     fn youtube_h264_uses_x264_crf18_and_copy_audio() {
-        let args = youtube_h264_args(Path::new("in.mp4"), Path::new("out.mp4"));
+        let args = youtube_h264_args(
+            Path::new("in.mp4"),
+            Path::new("out.mp4"),
+            Quality::default(),
+        );
         assert!(args.contains(&"libx264".to_string()));
         let crf = args.iter().position(|a| a == "-crf").unwrap();
         assert_eq!(args[crf + 1], "18");
